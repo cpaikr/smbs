@@ -852,9 +852,14 @@ fn daily_xlsx_uses_day_dates_and_relative_paths_resolve() {
     .current_dir(&directory));
     assert_eq!(output.status.code(), Some(0), "{value}");
     let path = directory.join("march.xlsx");
+    // The reported path is absolute and names the same file. Compare
+    // canonical forms: on macOS the temp directory is reached through the
+    // /var -> /private/var symlink, which the child's cwd resolves.
+    let reported = PathBuf::from(value["result"]["artifact"]["path"].as_str().unwrap());
+    assert!(reported.is_absolute(), "{}", reported.display());
     assert_eq!(
-        PathBuf::from(value["result"]["artifact"]["path"].as_str().unwrap()),
-        std::path::absolute(&path).unwrap()
+        std::fs::canonicalize(&reported).unwrap(),
+        std::fs::canonicalize(&path).unwrap()
     );
     let mut archive = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
     let mut read = |name: &str| {
