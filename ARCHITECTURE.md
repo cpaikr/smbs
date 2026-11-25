@@ -80,12 +80,17 @@ crates/smbs-cli (binary `smbs`)  ->  crates/smbs (SDK)  ->  http://www.smbs.biz
   gets the lock. Library callers configure pacing with `PacingConfig::new`;
   `PacingConfig::from_env` adds the environment variables.
 - **Output files are validated first and published atomically.** The
-  extension, parent directory, and no-clobber check run with the other
-  validation, before any request. The table is written to a temporary file in
-  the target directory, flushed, then moved into place. Without
-  `--overwrite`, the move is a hard link, which fails if the file appeared in
-  the meantime, so another program's file is never replaced. A failure after
-  the fetch is the CLI's own `output_failed` code (exit 1).
+  extension, parent directory, and existing-entry checks (`symlink_metadata`,
+  so a directory, a dangling link, or an unreadable entry is rejected) run
+  with the other validation, before any request. The table is written to a
+  `tempfile` in the target directory, flushed, then moved into place. Without
+  `--overwrite`, the move refuses to replace anything: `MoveFileExW` without
+  replace on Windows, and `renameat2(RENAME_NOREPLACE)` or link-then-unlink
+  on Unix. So a file another program creates after validation is never
+  replaced. A failure after the fetch is the CLI's own `output_failed` code
+  (exit 1), and the envelope does not carry the series. The directory is not
+  fsynced after the move, so a file written just before a power loss may be
+  lost.
 - **Errors say whether a retry can help.** A transport failure, timeout, 408,
   or any other 5xx is `source_unavailable`. A 429, or a 503 with `Retry-After`, is
   `rate_limited`, and a numeric `Retry-After` appears in `recoveryHint`. Both
