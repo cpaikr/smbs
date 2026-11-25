@@ -59,6 +59,19 @@
         Copy-Item -LiteralPath $staged -Destination $temporary -Force
         Move-Item -LiteralPath $temporary -Destination (Join-Path $installDir 'smbs.exe') -Force
 
+        # The receipt lets `smbs upgrade` recognize this binary as installer-managed.
+        $executable = (Resolve-Path -LiteralPath (Join-Path $installDir 'smbs.exe')).ProviderPath
+        $receipt = [ordered]@{
+            schemaVersion = 1
+            version = $version
+            target = $target
+            executable = $executable
+            sha256 = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
+        } | ConvertTo-Json -Compress
+        $temporary = Join-Path $installDir ".smbs-receipt.install.$PID.json"
+        [System.IO.File]::WriteAllText($temporary, $receipt + "`n", (New-Object System.Text.UTF8Encoding $false))
+        Move-Item -LiteralPath $temporary -Destination (Join-Path $installDir '.smbs-receipt.json') -Force
+
         Write-Host "Installed smbs $version to $(Join-Path $installDir 'smbs.exe')"
         $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
         if (-not (($userPath -split ';') -contains $installDir)) {

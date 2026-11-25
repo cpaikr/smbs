@@ -5,7 +5,10 @@
 
 mod clock;
 mod output;
+mod release;
+mod release_check;
 mod table;
+mod upgrade;
 
 use std::{ffi::OsString, fmt::Display, io::Write, path::PathBuf, process::ExitCode};
 
@@ -45,6 +48,14 @@ Notes:
   - The current month has no row until smbs.biz publishes it.
   - One request is sent per currency, paced; the command stops at the first failure.";
 
+const UPGRADE_AFTER: &str = "\
+Notes:
+  - Only a binary installed by the smbs installer (or a previous upgrade) is
+    replaced; its .smbs-receipt.json must match it. Others are refused.
+  - The release archive's SHA-256 and the new binary's --version are checked
+    before anything is replaced; a failed swap restores the previous binary.
+  - Progress lines go to stderr only when it is a terminal.";
+
 const DAILY_AFTER: &str = "\
 Examples:
   smbs daily --currency USD --from 2025-01-01 --to 2025-12-31
@@ -83,8 +94,29 @@ enum Command {
     Daily(DailyArgs),
     /// List supported currency codes, Korean names, and quote units (offline).
     Currencies(OutputArgs),
-    /// Print the CLI version and contract version as JSON (offline).
-    Version(OutputArgs),
+    /// Print the CLI version and build target as JSON (offline unless --check).
+    Version(VersionArgs),
+    /// Replace this smbs with the latest release, after verifying it.
+    #[command(after_help = UPGRADE_AFTER)]
+    Upgrade(UpgradeArgs),
+}
+
+#[derive(Debug, Args)]
+struct VersionArgs {
+    /// Also compare with the latest release on GitHub.
+    #[arg(long)]
+    check: bool,
+    #[command(flatten)]
+    output: OutputArgs,
+}
+
+#[derive(Debug, Args)]
+struct UpgradeArgs {
+    /// Report whether an upgrade is available without installing it.
+    #[arg(long)]
+    check: bool,
+    #[command(flatten)]
+    output: OutputArgs,
 }
 
 #[derive(Debug, Args)]
@@ -182,6 +214,20 @@ pub struct CliError {
 enum CliErrorCode {
     /// Writing the --output file failed after the rates were fetched.
     OutputFailed,
+    /// `upgrade` found no receipt matching the running executable.
+    UnmanagedInstallation,
+    /// No prebuilt binaries exist for this platform.
+    UpgradeUnsupported,
+    /// GitHub could not be reached or answered unexpectedly (retryable).
+    UpgradeSourceUnavailable,
+    /// The release metadata is missing, malformed, or lacks this platform.
+    UpgradeReleaseInvalid,
+    /// The download failed its checksum, archive, or self-test checks.
+    UpgradeVerificationFailed,
+    /// Replacing the executable failed; the previous one was restored.
+    UpgradeFailed,
+    /// Replacing failed and restoring also failed; see recoveryHint.
+    UpgradeRecoveryRequired,
     #[serde(untagged)]
     Sdk(ErrorCode),
 }
@@ -255,11 +301,14 @@ struct DailyResult {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct VersionResult {
     name: &'static str,
     version: &'static str,
     /// Rust target triple the binary was built for.
     target: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    release_check: Option<release_check::ReleaseCheck>,
 }
 
 fn main() -> ExitCode {
@@ -312,11 +361,27 @@ fn main() -> ExitCode {
                 name: "smbs",
                 version: env!("CARGO_PKG_VERSION"),
                 target: env!("SMBS_BUILD_TARGET"),
+                release_check: args.check.then(release_check::explicit_check),
             },
             Metadata::new(None),
             vec![],
-            args.pretty,
+            args.output.pretty,
         ),
+        Command::Upgrade(args) => match upgrade::run(args.check) {
+            Ok(result) => succeed(
+                "upgrade",
+                result,
+                Metadata::new(None),
+                vec![],
+                args.output.pretty,
+            ),
+            Err(error) => fail(
+                Some("upgrade"),
+                error,
+                Metadata::new(None),
+                args.output.pretty,
+            ),
+        },
     }
 }
 
@@ -488,6 +553,7 @@ fn operation_name(argument: Option<&OsString>) -> Option<&'static str> {
         "month-end" => Some("month-end"),
         "currencies" => Some("currencies"),
         "version" => Some("version"),
+        "upgrade" => Some("upgrade"),
         _ => None,
     }
 }

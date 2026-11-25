@@ -18,15 +18,24 @@ doc = false
 
 [dependencies]
 clap.workspace = true
+flate2.workspace = true
 rust_xlsxwriter.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tar.workspace = true
 tempfile.workspace = true
 smbs = { path = "../smbs", version = "0.2.0" }
+# HTTPS to GitHub, trusting the OS certificate store (works behind
+# TLS-inspecting corporate proxies).
+ureq = { workspace = true, features = ["rustls", "platform-verifier"] }
+zip.workspace = true
 
 [dev-dependencies]
 encoding_rs.workspace = true
+flate2.workspace = true
+sha2.workspace = true
+tar.workspace = true
 zip.workspace = true
 
 [lints]

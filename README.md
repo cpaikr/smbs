@@ -47,8 +47,26 @@ smbs --version
 smbs --help
 ```
 
-To upgrade, run the installer again. To pin a version, replace
-`latest/download` with `download/vX.Y.Z`. There is no self-update command.
+### Upgrade
+
+```sh
+smbs version --check   # compare with the latest release; never installs
+smbs upgrade --check   # same, for an installer-managed binary
+smbs upgrade           # download, verify, and replace this binary
+```
+
+`smbs upgrade` only replaces a binary that the installer or a previous
+upgrade put in place. Those leave a `.smbs-receipt.json` beside the binary,
+recording its version, platform, path, and SHA-256. Binaries built from
+source or copied elsewhere are refused; upgrade those the way you installed
+them. Before replacing anything, `smbs upgrade` checks the release archive's
+SHA-256 against the release manifest and runs the new binary's `--version`.
+If the swap fails, the previous binary is restored.
+
+Installs from before 0.3.0 have no receipt: run the installer once more, and
+`smbs upgrade` works from then on. Rerunning the installer also always works
+as an upgrade. To pin a version, replace `latest/download` with
+`download/vX.Y.Z` in the install command.
 
 ### Build from source
 
@@ -85,7 +103,8 @@ Each command prints one JSON line to stdout:
 have no row. Failures print
 `{"ok":false,"operation":...,"error":{"code","message","retryable",...}}`.
 Exit status is 0 for success, 1 for an execution failure, and 2 for an invalid
-invocation. stderr stays empty.
+invocation. stderr stays empty, except that `smbs upgrade` prints progress
+lines there when stderr is a terminal.
 
 ## CSV and Excel files
 

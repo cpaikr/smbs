@@ -11,12 +11,17 @@ For version `X.Y.Z`, tag `vX.Y.Z`:
 - `smbs-X.Y.Z-<target>.tar.gz` (or `.zip` on Windows), each holding the
   binary and `LICENSE.md`;
 - `install.sh` and `install.ps1`, generated from
-  [`scripts/install/`](../scripts/install/) with each archive's SHA-256 embedded;
+  [`scripts/install/`](../scripts/install/) with each archive's SHA-256
+  embedded. Each writes `.smbs-receipt.json` beside the binary it installs;
+- `release-manifest.json`: version, tag, and each target's asset and SHA-256.
+  `smbs upgrade` and `version --check` read it through `releases/latest`;
 - `SHA256SUMS` covering all of the above.
 
 Every target is built on its own native runner. Before anything is
 published, the generated installer runs on that runner, and the installed
-binary runs `--version`, `--help`, `currencies`, and `version`.
+binary runs `--version`, `--help`, `currencies`, and `version`. Verification
+also checks that the receipt describes the installed binary and that the
+manifest entry agrees with `SHA256SUMS`.
 
 ## Steps
 

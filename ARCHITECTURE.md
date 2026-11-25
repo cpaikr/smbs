@@ -97,6 +97,37 @@ crates/smbs-cli (binary `smbs`)  ->  crates/smbs (SDK)  ->  http://www.smbs.biz
   are retryable. A redirect or other 4xx is `source_changed` and is not
   retryable. Nothing retries automatically.
 
+## Upgrades
+
+[`upgrade.rs`](crates/smbs-cli/src/upgrade.rs) implements `smbs upgrade`, and
+[`release.rs`](crates/smbs-cli/src/release.rs) reads release metadata. Both
+are CLI-only; the SDK never contacts GitHub.
+
+- **Ownership.** A binary is managed only if `.smbs-receipt.json` beside it
+  records the running version, platform key, canonical path, and SHA-256.
+  Anything else is `unmanaged_installation`, decided before any network
+  request.
+- **Metadata.** `releases/latest/download/release-manifest.json` is fetched
+  over HTTPS. The OS certificate store is trusted, so TLS-inspecting proxies
+  work. No API token is needed, and the endpoint skips drafts and prereleases.
+  Versions compare as numeric `MAJOR.MINOR.PATCH`. A missing platform entry is
+  reported, never replaced by an older release. A release without a manifest
+  (from before 0.3.0) is told apart from "nothing published" by its
+  `SHA256SUMS`.
+- **Verification.** The archive's SHA-256 must match the manifest. The
+  archive must hold exactly the executable and `LICENSE.md`, and the staged
+  binary's `--version` must print the expected version within 10 s.
+- **Replacement.** Under an exclusive `.smbs-upgrade.lock`:
+  1. Stage the new binary and receipt in the same directory.
+  2. Set the old binary aside (a rename on Windows, which allows renaming a
+     running `.exe`; a hard link on Unix).
+  3. Rename the new binary in, then the new receipt.
+  4. If a step fails, restore the old binary. If that restore also fails,
+     report `upgrade_recovery_required` with the manual steps.
+
+  Leftover `.smbs-new-*`, `.smbs-old-*`, and `.smbs-receipt-new-*` files are
+  swept, under the lock, on the next run.
+
 ## Distribution
 
 Releases are built and published by
