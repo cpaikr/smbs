@@ -5,6 +5,13 @@
 //! keeps the lock until the request finishes. Concurrent agents and scripts
 //! therefore cannot burst the source, and slow connection setup, cancellation,
 //! process death, or wall-clock changes cannot release a queued burst.
+//!
+//! With mixed intervals, each request starts at least the larger of its own
+//! interval and the previous request's interval after that previous request.
+//! A longer interval held by a process still waiting for the lock does not
+//! constrain other processes' requests until it acquires: waiting callers have
+//! no live, crash-safe way to publish their interval without a second shared
+//! record that can go stale.
 
 use std::{
     ffi::OsString,
@@ -248,7 +255,9 @@ fn invalid_interval(parameter: &str) -> SmbsError {
 }
 
 fn default_state_directory(env: Env<'_>) -> Option<PathBuf> {
-    let non_empty = |name: &str| env(name).filter(|value| !value.is_empty());
+    // A relative root would resolve against each process's working directory
+    // and split the shared lock; the XDG spec also says to ignore it.
+    let non_empty = |name: &str| env(name).filter(|value| PathBuf::from(value).is_absolute());
     if cfg!(windows) {
         non_empty("LOCALAPPDATA").map(|root| PathBuf::from(root).join("smbs"))
     } else {
@@ -363,6 +372,18 @@ mod tests {
         assert_eq!(relative.unwrap_err().code, ErrorCode::InvalidRequest);
         let missing = PacingConfig::from_env_with(None, &env(&[]));
         assert_eq!(missing.unwrap_err().code, ErrorCode::InternalError);
+        // Relative per-user roots are ignored rather than split per working directory.
+        let relative_roots = env(&[
+            ("LOCALAPPDATA", "state"),
+            ("XDG_STATE_HOME", "state"),
+            ("HOME", "home"),
+        ]);
+        assert_eq!(
+            PacingConfig::from_env_with(None, &relative_roots)
+                .unwrap_err()
+                .code,
+            ErrorCode::InternalError
+        );
     }
 
     #[test]

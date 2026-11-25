@@ -51,6 +51,18 @@ impl YearMonth {
         parse_with_separator(text, b'.')
     }
 
+    /// The following month, or `None` after 9999-12.
+    pub fn next(self) -> Option<Self> {
+        if self.month == 12 {
+            Self::new(self.year.checked_add(1)?, 1).ok()
+        } else {
+            Some(Self {
+                year: self.year,
+                month: self.month + 1,
+            })
+        }
+    }
+
     pub const fn year(self) -> u16 {
         self.year
     }

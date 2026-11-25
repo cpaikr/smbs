@@ -168,8 +168,11 @@ fn main() -> ExitCode {
                 ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
             ) =>
         {
-            let _ = std::io::stdout().write_all(error.render().to_string().as_bytes());
-            return ExitCode::SUCCESS;
+            return if write_stdout(&error.render().to_string()) {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            };
         }
         Err(error) => {
             let operation = operation_name(arguments.get(1));
@@ -355,8 +358,11 @@ fn succeed<T: Serialize>(
         metadata,
         warnings,
     };
-    write_json(&envelope, pretty);
-    ExitCode::SUCCESS
+    if write_json(&envelope, pretty) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 fn fail(
@@ -370,6 +376,7 @@ fn fail(
     } else {
         1
     };
+    // A failed write leaves the failure status unchanged: it is already nonzero.
     write_json(
         &Failure {
             ok: false,
@@ -382,7 +389,10 @@ fn fail(
     ExitCode::from(status)
 }
 
-fn write_json(value: &impl Serialize, pretty: bool) {
+/// Returns whether the whole document reached stdout. A failed write cannot be
+/// reported anywhere else (stderr stays empty), so callers turn it into a
+/// nonzero exit status.
+fn write_json(value: &impl Serialize, pretty: bool) -> bool {
     let mut rendered = if pretty {
         serde_json::to_string_pretty(value)
     } else {
@@ -390,8 +400,12 @@ fn write_json(value: &impl Serialize, pretty: bool) {
     }
     .expect("envelopes serialize");
     rendered.push('\n');
-    // A closed stdout cannot be reported anywhere else; the exit status still is.
-    let _ = std::io::stdout().lock().write_all(rendered.as_bytes());
+    write_stdout(&rendered)
+}
+
+fn write_stdout(text: &str) -> bool {
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(text.as_bytes()).is_ok() && stdout.flush().is_ok()
 }
 
 #[cfg(test)]

@@ -40,14 +40,20 @@ pub struct SeriesRequest {
 }
 
 impl SeriesRequest {
+    /// The currency is re-resolved against [`crate::CURRENCIES`], so a
+    /// hand-built [`Currency`] cannot send an unlisted code or report a wrong
+    /// name or unit.
+    ///
     /// # Errors
-    /// `invalid_request` when `from` is after `to` or before [`YearMonth::EARLIEST`].
+    /// `invalid_request` when the currency is not listed, or `from` is after
+    /// `to` or before [`YearMonth::EARLIEST`].
     pub fn new(
         basis: Basis,
-        currency: &'static Currency,
+        currency: &Currency,
         from: YearMonth,
         to: YearMonth,
     ) -> Result<Self, SmbsError> {
+        let currency = Currency::parse(currency.code)?;
         if from < YearMonth::EARLIEST {
             return Err(SmbsError::invalid(
                 format!(
@@ -91,8 +97,18 @@ impl SeriesRequest {
 
     /// The source's `arr_value` query value, e.g. `USD_2025-01_2025-12`.
     /// Only ASCII letters, digits, `-`, and `_`, so it needs no escaping.
+    ///
+    /// The month-end endpoint treats its end month as exclusive (observed
+    /// 2026-11-25: `USD_2025-01_2025-03` returns only 2025.01 and 2025.02),
+    /// while the monthly-average endpoint includes it. Sending the following
+    /// month keeps `to` inclusive for both bases; `parse_chart` still rejects
+    /// rows after `to`.
     pub(crate) fn arr_value(&self) -> String {
-        format!("{}_{}_{}", self.currency.code, self.from, self.to)
+        let end = match self.basis {
+            Basis::MonthlyAverage => self.to,
+            Basis::MonthEnd => self.to.next().unwrap_or(self.to),
+        };
+        format!("{}_{}_{}", self.currency.code, self.from, end)
     }
 }
 
@@ -150,7 +166,15 @@ pub(crate) fn parse_chart(
     }
 
     let mut observations: Vec<Observation> = Vec::new();
-    for set in chart.children().filter(|node| node.has_tag_name("set")) {
+    for node in chart.children().filter(roxmltree::Node::is_element) {
+        // Rows must be direct <set> children; any other container (such as a
+        // multi-series <dataset>) would otherwise read as an empty series.
+        match node.tag_name().name() {
+            "set" => {}
+            "styles" => continue,
+            other => return Err(changed(format!("Unexpected chart element <{other}>."))),
+        }
+        let set = node;
         let label = set.attribute("label").unwrap_or_default();
         let value = set.attribute("value").unwrap_or_default();
         let month = YearMonth::parse_source_label(label)
@@ -260,6 +284,11 @@ mod tests {
                 ok,
                 "<set label='2025.01' value='1' /><set label='2025.01' value='1' />",
             ),
+            (
+                ok,
+                "<dataset><set label='2025.01' value='1000' /></dataset>",
+            ),
+            (ok, "<categories /><set label='2025.01' value='1000' />"),
         ] {
             let error = parse_chart(&chart(caption, rows), &req, URL).unwrap_err();
             assert_eq!(error.code, ErrorCode::SourceChanged, "{caption} {rows}");
@@ -279,13 +308,24 @@ mod tests {
         let usd = Currency::parse("usd").unwrap();
         let jan = YearMonth::new(2025, 1).unwrap();
         let dec = YearMonth::new(2025, 12).unwrap();
-        assert_eq!(
-            SeriesRequest::new(Basis::MonthEnd, usd, jan, dec)
+        let arr_value = |basis, from, to| {
+            SeriesRequest::new(basis, usd, from, to)
                 .unwrap()
-                .arr_value(),
+                .arr_value()
+        };
+        assert_eq!(
+            arr_value(Basis::MonthlyAverage, jan, dec),
             "USD_2025-01_2025-12"
         );
-        assert!(SeriesRequest::new(Basis::MonthEnd, usd, jan, jan).is_ok());
+        // The month-end endpoint's end month is exclusive, so the next month is sent.
+        assert_eq!(arr_value(Basis::MonthEnd, jan, dec), "USD_2025-01_2026-01");
+        assert_eq!(arr_value(Basis::MonthEnd, jan, jan), "USD_2025-01_2025-02");
+        let last = YearMonth::new(9999, 12).unwrap();
+        assert_eq!(
+            arr_value(Basis::MonthEnd, last, last),
+            "USD_9999-12_9999-12"
+        );
+        assert_eq!(last.next(), None);
         assert_eq!(
             SeriesRequest::new(Basis::MonthEnd, usd, dec, jan)
                 .unwrap_err()
@@ -295,5 +335,31 @@ mod tests {
         );
         let old = YearMonth::new(1989, 12).unwrap();
         assert!(SeriesRequest::new(Basis::MonthEnd, usd, old, jan).is_err());
+
+        // Hand-built currencies resolve to the catalog or are rejected.
+        let wrong_unit = Currency {
+            code: "USD",
+            name: "custom",
+            unit: 100,
+        };
+        let request = SeriesRequest::new(Basis::MonthEnd, &wrong_unit, jan, dec).unwrap();
+        assert_eq!(
+            (request.currency().name, request.currency().unit),
+            ("미국 달러", 1)
+        );
+        for code in ["XXX", "USD&x=1"] {
+            let unlisted = Currency {
+                code,
+                name: "custom",
+                unit: 1,
+            };
+            assert_eq!(
+                SeriesRequest::new(Basis::MonthEnd, &unlisted, jan, dec)
+                    .unwrap_err()
+                    .parameter
+                    .as_deref(),
+                Some("currency")
+            );
+        }
     }
 }
