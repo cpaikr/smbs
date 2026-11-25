@@ -35,15 +35,19 @@ crates/smbs-cli (binary `smbs`)  ->  crates/smbs (SDK)  ->  http://www.smbs.biz
    4. parses the chart: only `<set>` and `<styles>` children, the caption
       for the basis, `YYYY.MM` labels, positive plain decimals, strictly
       ascending months, and the requested range.
-3. The command stops at the first failure. Its envelope carries the error code
-   and the public `sourceUrl`.
+3. The command stops at the first failure. Its envelope carries the error
+   code. Errors from contacting or parsing the source also carry the public
+   `sourceUrl`; validation and pacing-state errors do not.
 
 ## Invariants
 
 - **Fixed origin.** Requests go only to `http://www.smbs.biz`, except a
   loopback origin compiled in with the `fixture-origin` feature for tests.
 - **Fail closed on source drift.** Anything the parser does not recognize is
-  `source_changed` or `source_parse_failure`, never partial data.
+  `source_changed` or `source_parse_failure`, never partial data. That
+  includes chart elements other than `<set>` and `<styles>`, so rows moved
+  into a new container cannot read as an empty series. Only a chart with no
+  elements of its own besides `<styles>` is a successful empty series.
 - **Allowlisted currencies.** The source returns an empty chart for unknown
   codes, so only the dated list in
   [`currency.rs`](crates/smbs/src/currency.rs) is accepted. `SeriesRequest::new`
@@ -56,15 +60,17 @@ crates/smbs-cli (binary `smbs`)  ->  crates/smbs (SDK)  ->  http://www.smbs.biz
   request. The file is never replaced. An unreadable state is an
   `internal_error`, and requests are never sent unpaced. Waiters are not
   served in order, so waiting more than 120 s for the lock gives up with a
-  retryable `internal_error`. Pacing is local to one host. The model follows
-  the mytech request-pacing practice and darty. With mixed intervals, each
-  request waits the larger of its own interval and the previous request's
-  interval. A longer interval held by a process still waiting for the lock
-  does not slow other processes until it gets the lock. Library callers configure it
-  with `PacingConfig::new`; `PacingConfig::from_env` adds the environment
-  variables.
+  retryable `internal_error`. Pacing covers only processes that share a state
+  directory. The default directory is per user, so other OS users, other
+  hosts, and processes with a different `SMBS_STATE_DIR` are not
+  coordinated. The model follows the mytech request-pacing practice and
+  darty. With mixed intervals, each request waits the larger of its own
+  interval and the previous request's interval. A longer interval held by a
+  process still waiting for the lock does not slow other processes until it
+  gets the lock. Library callers configure pacing with `PacingConfig::new`;
+  `PacingConfig::from_env` adds the environment variables.
 - **Errors say whether a retry can help.** A transport failure, timeout, 408,
-  or 5xx is `source_unavailable`. A 429, or a 503 with `Retry-After`, is
+  or any other 5xx is `source_unavailable`. A 429, or a 503 with `Retry-After`, is
   `rate_limited`, and a numeric `Retry-After` appears in `recoveryHint`. Both
   are retryable. A redirect or other 4xx is `source_changed` and is not
   retryable. Nothing retries automatically.

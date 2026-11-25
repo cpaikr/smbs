@@ -14,8 +14,11 @@ no login and does not use the Excel export. See the
 Requires Rust 1.89 or later.
 
 ```sh
-cargo build --release -p smbs-cli   # target/release/smbs
+cargo build --release -p smbs-cli
 ```
+
+This builds `target/release/smbs` (`smbs.exe` on Windows). The examples below
+assume that binary is on `PATH`; otherwise call it by that path.
 
 ## Commands
 
@@ -30,7 +33,7 @@ smbs --help                                           # same as bare `smbs`
 Each command prints one JSON line to stdout:
 
 ```json
-{"ok":true,"operation":"month-end","result":{"basis":"month_end","from":"2025-01","to":"2025-02","series":[{"basis":"month_end","currency":"JPY","name":"일본 엔","unit":100,"from":"2025-01","to":"2025-02","observations":[{"month":"2025-01","rate":927.88}],"sourceUrl":"http://www.smbs.biz/..."}]},"metadata":{"contractVersion":"1","requestIntervalMs":1000,"requestIntervalSource":"default"},"warnings":[]}
+{"ok":true,"operation":"month-end","result":{"basis":"month_end","from":"2025-01","to":"2025-01","series":[{"basis":"month_end","currency":"JPY","name":"일본 엔","unit":100,"from":"2025-01","to":"2025-01","observations":[{"month":"2025-01","rate":927.88}],"sourceUrl":"http://www.smbs.biz/..."}]},"metadata":{"contractVersion":"1","requestIntervalMs":1000,"requestIntervalSource":"default"},"warnings":[]}
 ```
 
 `rate` is KRW per `unit` units of the currency. The current month has no row
@@ -41,9 +44,10 @@ invocation. stderr stays empty.
 
 ## Request pacing
 
-Every `smbs` process on a machine waits 1000 ms before each request,
-coordinated through a shared lock file, so parallel scripts cannot burst the
-site.
+`smbs` processes that share a state directory wait 1000 ms before each
+request, coordinated through one lock file, so parallel scripts cannot burst
+the site. The default directory is per user. Processes run by other OS users,
+on other hosts, or with a different `SMBS_STATE_DIR` are not coordinated.
 
 | Setting | Effect |
 | --- | --- |
