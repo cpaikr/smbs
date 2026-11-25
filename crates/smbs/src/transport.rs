@@ -89,11 +89,13 @@ impl Transport {
                 ),
                 _ => unavailable("Reading the smbs.biz response failed.".to_owned()),
             })?;
-        // The source answers malformed requests with an HTML error page.
-        if !content_type.starts_with("text/xml") {
+        // The source answers malformed requests with an HTML error page; reject
+        // that early, but accept either XML media type (RFC 7303).
+        let media_type = content_type.split(';').next().unwrap_or_default().trim();
+        if !matches!(media_type, "text/xml" | "application/xml") {
             return Err(SmbsError::source(
                 ErrorCode::SourceChanged,
-                format!("smbs.biz returned Content-Type \"{content_type}\" instead of text/xml."),
+                format!("smbs.biz returned Content-Type \"{content_type}\" instead of XML."),
                 &public_url,
             ));
         }
