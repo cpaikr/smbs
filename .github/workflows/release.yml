@@ -178,6 +178,8 @@ jobs:
           Get-Content dist/install.ps1 -Raw | Invoke-Expression
           $bin = Join-Path $env:SMBS_INSTALL_DIR 'smbs.exe'
           if ((& $bin --version) -ne "smbs $env:VERSION") { throw 'unexpected --version output' }
+          $help = (& $bin --help) -join "`n"
+          if ($LASTEXITCODE -ne 0 -or -not $help.Contains('daily')) { throw '--help failed or omits daily' }
           $currencies = & $bin currencies | ConvertFrom-Json
           if (-not $currencies.ok -or $currencies.result.Count -ne 58) { throw 'currencies failed' }
           $version = & $bin version | ConvertFrom-Json

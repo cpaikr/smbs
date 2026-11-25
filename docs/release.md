@@ -23,8 +23,10 @@ binary runs `--version`, `--help`, `currencies`, and `version`.
 1. **Candidate.** Pull requests that touch release files already run the
    release workflow without publishing. For other changes, run it by hand
    without `publish`: `gh workflow run release.yml --ref <branch>`.
-2. **Version.** Set `version` in the root `Cargo.toml` (and the `smbs`
-   dependency version in `crates/smbs-cli/Cargo.toml`), then merge to `main`.
+2. **Version.** Set `version` in the root `Cargo.toml` and the `smbs`
+   dependency version in `crates/smbs-cli/Cargo.toml`. Run `cargo check` to
+   update `Cargo.lock`, which CI and releases use with `--locked`. Commit all
+   three files and merge to `main`.
 3. **CI on main.** Wait for the `CI` workflow's push run on that commit to
    pass. It covers Linux, macOS, and Windows. Runs on `main` are never
    cancelled. If one failed for an unrelated reason, re-run it.
@@ -50,8 +52,12 @@ binary runs `--version`, `--help`, `currencies`, and `version`.
 
 - Never move or reuse a published tag, and never replace an asset. If a
   release is wrong, ship `X.Y.(Z+1)`.
-- If the workflow fails before `publish`, nothing is public: fix the problem
-  and rerun with the same tag.
+- If the workflow fails before `publish`, nothing is public. A rerun with the
+  same tag builds the tagged commit, using that commit's workflow and
+  scripts, so it can only absorb a transient failure. For a fix to source,
+  scripts, or the workflow, either ship `X.Y.(Z+1)`, or move the unpublished
+  tag to the fixed commit on `main` once that commit's CI push run passes,
+  then dispatch again.
 - If it fails inside `publish`, a draft release may exist. Delete the draft
   (`gh release delete vX.Y.Z`; the tag stays) and rerun the whole workflow.
 

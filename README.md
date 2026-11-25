@@ -59,7 +59,9 @@ and releases use.
 cargo build --release -p smbs-cli
 ```
 
-This builds `target/release/smbs` (`smbs.exe` on Windows).
+This builds `target/release/smbs` (`smbs.exe` on Windows). The examples
+below call `smbs`, so either put `target/release` on `PATH` or call the
+binary by its path.
 
 ## Commands
 
