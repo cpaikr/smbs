@@ -94,7 +94,10 @@ impl Transport {
                     format!("smbs.biz returned more than {body_limit} bytes."),
                     &public_url,
                 ),
-                _ => unavailable("Reading the smbs.biz response failed.".to_owned()),
+                other => unavailable(truncate(
+                    &format!("Reading the smbs.biz response failed: {other}."),
+                    300,
+                )),
             })?;
         // The source answers malformed requests with an HTML error page; reject
         // that early, but accept either XML media type (RFC 7303).

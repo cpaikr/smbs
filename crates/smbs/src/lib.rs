@@ -18,7 +18,7 @@ mod transport;
 
 pub use client::Client;
 pub use currency::{CURRENCIES, Currency};
-pub use daily::{DailyObservation, DailyRequest, DailySeries};
+pub use daily::{DailyBasis, DailyObservation, DailyRequest, DailySeries};
 pub use date::Date;
 pub use error::{ErrorCode, SmbsError};
 pub use month::YearMonth;

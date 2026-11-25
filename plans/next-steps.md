@@ -1,6 +1,6 @@
 # Plan: daily rates, CSV/Excel output, release binaries
 
-Status: proposed, awaiting approval (2026-11-25).
+Status: approved 2026-11-25. PR A is in review (#4); PR B and PR C are next.
 
 Three PRs, in this order, then a `v0.2.0` release. Each PR updates README,
 ARCHITECTURE, and the source contract for what it changes.
@@ -24,13 +24,13 @@ Design:
 
 - `smbs daily --currency USD,JPY --from 2025-01-01 [--to 2025-12-31]`.
   `--to` defaults to today in Korea. Observations are `{date, rate}`.
-- New `Date` type (`YYYY-MM-DD`, validated calendar day). `SeriesRequest`
-  becomes generic over the period: `Basis::Daily` uses dates, while the
-  monthly bases keep `YearMonth`. Same allowlist, pacing, transport, and
-  error codes.
+- New `Date` type (`YYYY-MM-DD`, validated calendar day) and separate
+  `DailyRequest`/`DailySeries` types (basis `daily`). The monthly types are
+  unchanged. All three operations share one chart parser (`chart.rs`) and
+  the same allowlist, pacing, transport, and error codes.
 - The body cap rises to 4 MiB for daily (36 years of JPY is about 600 KB).
-- Same tests as the monthly path: parser fixtures, CLI process tests, and a
-  live smoke test.
+- Same tests as the monthly path: parser fixtures and CLI process tests,
+  plus a manual live check recorded in the PR.
 
 ## PR B: CSV and Excel files (`--output`)
 

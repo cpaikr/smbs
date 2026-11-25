@@ -13,7 +13,7 @@ use clap::{
 };
 use serde::Serialize;
 use smbs::{
-    Basis, CURRENCIES, Client, Currency, DailyRequest, DailySeries, Date, ErrorCode,
+    Basis, CURRENCIES, Client, Currency, DailyBasis, DailyRequest, DailySeries, Date, ErrorCode,
     IntervalSource, PacingConfig, Series, SeriesRequest, SmbsError, YearMonth, parse_interval_ms,
 };
 
@@ -184,7 +184,7 @@ struct SeriesResult {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DailyResult {
-    basis: &'static str,
+    basis: DailyBasis,
     from: Date,
     to: Date,
     series: Vec<DailySeries>,
@@ -309,7 +309,7 @@ fn run_daily(args: &DailyArgs) -> ExitCode {
                 .then(|| empty_warning(series.currency, series.from, series.to))
         },
         |series, (from, to)| DailyResult {
-            basis: "daily",
+            basis: DailyBasis::Daily,
             from,
             to,
             series,

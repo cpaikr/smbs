@@ -88,11 +88,20 @@ impl Date {
         let short_year: u16 = text[..2].parse().ok()?;
         let month: u8 = text[3..5].parse().ok()?;
         let day: u8 = text[6..].parse().ok()?;
-        let mut candidates = (from.year / 100..=to.year / 100)
+        // Consider one century either side so a row just outside the range
+        // still resolves and the caller can report it as out of range.
+        let candidates: Vec<Self> = ((from.year / 100).saturating_sub(1)..=(to.year / 100 + 1))
             .filter_map(|century| Self::new(century * 100 + short_year, month, day).ok())
-            .filter(|date| (from..=to).contains(date));
-        let date = candidates.next()?;
-        candidates.next().is_none().then_some(date)
+            .collect();
+        let mut inside = candidates.iter().filter(|date| (from..=to).contains(*date));
+        match (inside.next(), inside.next()) {
+            (Some(date), None) => Some(*date),
+            (Some(_), Some(_)) => None,
+            // Outside the range in every century: the nearest one.
+            (None, _) => candidates
+                .into_iter()
+                .min_by_key(|date| distance_in_years(date.year, from.year, to.year)),
+        }
     }
 
     pub const fn year(self) -> u16 {
@@ -105,6 +114,14 @@ impl Date {
 
     pub const fn day(self) -> u8 {
         self.day
+    }
+}
+
+const fn distance_in_years(year: u16, from: u16, to: u16) -> u16 {
+    if year < from {
+        from - year
+    } else {
+        year.saturating_sub(to)
     }
 }
 
@@ -174,8 +191,30 @@ mod tests {
             label("25.03.31", "1990-01-01", "2026-12-31"),
             Some(date("2025-03-31"))
         );
-        // Outside the requested range in every century.
-        assert_eq!(label("25.03.31", "2025-04-01", "2025-12-31"), None);
+        // Outside the range: the nearest century, so the caller reports the
+        // range rather than the label.
+        assert_eq!(
+            label("25.03.31", "2025-04-01", "2025-12-31"),
+            Some(date("2025-03-31"))
+        );
+        assert_eq!(
+            label("90.01.02", "2089-01-01", "2089-12-31"),
+            Some(date("2090-01-02"))
+        );
+        // Leap day only exists in 2000, not 2100.
+        assert_eq!(
+            label("00.02.29", "1990-01-01", "2089-12-31"),
+            Some(date("2000-02-29"))
+        );
+        // Range edges.
+        assert_eq!(
+            label("90.01.01", "1990-01-01", "2089-12-31"),
+            Some(date("1990-01-01"))
+        );
+        assert_eq!(
+            label("89.12.31", "1990-01-01", "2089-12-31"),
+            Some(date("2089-12-31"))
+        );
         // Two centuries inside the range is ambiguous.
         assert_eq!(label("95.01.02", "1995-01-01", "2095-12-31"), None);
         for bad in ["2025.03.31", "25-03-31", "25.02.30", "25.3.31"] {

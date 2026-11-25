@@ -1,5 +1,5 @@
 use crate::{
-    DailyRequest, DailySeries, PacingConfig, Series, SeriesRequest, SmbsError,
+    DailyBasis, DailyRequest, DailySeries, PacingConfig, Series, SeriesRequest, SmbsError,
     daily::{DAILY_PATH, parse_daily_chart},
     series::parse_chart,
     transport::{DAILY_BODY_LIMIT, MONTHLY_BODY_LIMIT, SMBS_ORIGIN, Transport},
@@ -82,6 +82,7 @@ impl Client {
         let observations = parse_daily_chart(&text, request, &source_url)?;
         let currency = request.currency();
         Ok(DailySeries {
+            basis: DailyBasis::Daily,
             currency: currency.code,
             name: currency.name,
             unit: currency.unit,

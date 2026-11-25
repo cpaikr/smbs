@@ -37,8 +37,8 @@ Each command prints one JSON line to stdout:
 {"ok":true,"operation":"month-end","result":{"basis":"month_end","from":"2025-01","to":"2025-01","series":[{"basis":"month_end","currency":"JPY","name":"일본 엔","unit":100,"from":"2025-01","to":"2025-01","observations":[{"month":"2025-01","rate":927.88}],"sourceUrl":"http://www.smbs.biz/..."}]},"metadata":{"contractVersion":"1","requestIntervalMs":1000,"requestIntervalSource":"default"},"warnings":[]}
 ```
 
-`rate` is KRW per `unit` units of the currency. Daily observations carry
-`date` instead of `month`. The current month, and today until it is published,
+`rate` is KRW per `unit` units of the currency. Daily results have basis
+`daily`, and their observations carry `date` instead of `month`. The current month, and today until it is published,
 have no row. Failures print
 `{"ok":false,"operation":...,"error":{"code","message","retryable",...}}`.
 Exit status is 0 for success, 1 for an execution failure, and 2 for an invalid

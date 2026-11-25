@@ -69,6 +69,14 @@ impl DailyRequest {
     }
 }
 
+/// The basis of every daily series; serializes as `"daily"`, alongside the
+/// monthly [`crate::Basis`] values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DailyBasis {
+    Daily,
+}
+
 /// One business day's KRW rate for `unit` units of the series currency.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct DailyObservation {
@@ -81,6 +89,7 @@ pub struct DailyObservation {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DailySeries {
+    pub basis: DailyBasis,
     pub currency: &'static str,
     pub name: &'static str,
     pub unit: u16,
@@ -158,6 +167,18 @@ mod tests {
             let error = parse_daily_chart(&chart(caption, rows), &req, URL).unwrap_err();
             assert_eq!(error.code, ErrorCode::SourceChanged, "{caption} {rows}");
         }
+        // A row just outside the range is reported as such, not as a bad label.
+        let error = parse_daily_chart(
+            &chart("기간별 매매기준율", "<set label='25.02.28' value='1' />"),
+            &req,
+            URL,
+        )
+        .unwrap_err();
+        assert!(
+            error.message.contains("outside the requested range"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]
