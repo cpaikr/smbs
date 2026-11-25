@@ -62,12 +62,18 @@ smbs daily --currency USD,JPY --from 2025-03-01 --to 2025-03-31 --output march.c
   row is frozen, and a source line sits under the table.
 - **`.csv`:** UTF-8 with a BOM so Excel shows Korean text correctly, and CRLF
   line endings.
-- **Existing files** are never replaced unless you pass `--overwrite`. Path
-  problems are reported before any request is sent.
-- **Atomic writes:** the file is written to a temporary name and then moved
-  into place, so a failed run never leaves a partial file. If writing fails
-  after the fetch, the error code is `output_failed` (on Windows, check that
-  the file isn't open in Excel).
+- **Existing files** are never replaced unless you pass `--overwrite`.
+  `--overwrite` swaps in a new file: a symlink at the path is replaced rather
+  than followed, and the old file's permissions are not kept. A wrong
+  extension, a missing directory, a directory at the path, or an existing
+  file without `--overwrite` is reported (exit 2) before any request is sent.
+- **Atomic writes:** the file is written under a temporary `.smbs-*.tmp` name
+  in the same directory and then moved into place, so a failed run never
+  leaves a partial file. Only a killed process can leave a `.smbs-*.tmp`
+  behind.
+- **Write failures:** if writing fails after the fetch, the error code is
+  `output_failed` (exit 1) and the fetched series are not returned. On
+  Windows, check that the file isn't open in Excel.
 
 The JSON on stdout still carries the series, plus
 `result.artifact = {path, format, bytes, sha256, rows}`.

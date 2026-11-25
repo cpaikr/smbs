@@ -2,7 +2,6 @@
 
 use std::{
     fmt::Write as _,
-    fs::OpenOptions,
     io::Write as _,
     path::{Path, PathBuf},
 };
@@ -82,11 +81,29 @@ impl OutputTarget {
                 "Create the directory first.",
             ));
         }
-        if !overwrite && path.exists() {
-            return Err(invalid(
-                format!("\"{}\" already exists.", path.display()),
-                "Choose another path, or pass --overwrite to replace it.",
-            ));
+        // symlink_metadata: a dangling link or an unreadable entry still
+        // counts as something in the way, rather than as free space.
+        match std::fs::symlink_metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(invalid(
+                    format!("Cannot check \"{}\": {error}.", path.display()),
+                    "Check the path and its permissions.",
+                ));
+            }
+            Ok(metadata) if metadata.is_dir() => {
+                return Err(invalid(
+                    format!("\"{}\" is a directory.", path.display()),
+                    "Choose a file path ending in .csv or .xlsx.",
+                ));
+            }
+            Ok(_) if !overwrite => {
+                return Err(invalid(
+                    format!("\"{}\" already exists.", path.display()),
+                    "Choose another path, or pass --overwrite to replace it.",
+                ));
+            }
+            Ok(_) => {}
         }
         Ok(Self {
             path: path.to_owned(),
@@ -118,44 +135,38 @@ impl OutputTarget {
         })
     }
 
+    /// Writes a uniquely named temporary file in the target directory,
+    /// flushes it, then moves it into place. Without `--overwrite` the move
+    /// refuses to replace anything (`MoveFileExW` without replace on Windows,
+    /// `renameat2(RENAME_NOREPLACE)` or link-then-unlink on Unix), so a file
+    /// created by another program after validation is never replaced. The
+    /// temporary file is removed on every error path; only a killed process
+    /// can leave one behind.
     fn publish(&self, bytes: &[u8]) -> Result<(), CliError> {
-        let file_name = self
-            .path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let temporary = self
-            .path
-            .with_file_name(format!(".{file_name}.smbs-{}.tmp", std::process::id()));
-        let result = (|| -> std::io::Result<()> {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
-            drop(file);
-            if self.overwrite {
-                std::fs::rename(&temporary, &self.path)
-            } else {
-                // A hard link fails if the target exists, so a file created
-                // after validation is never replaced.
-                std::fs::hard_link(&temporary, &self.path).or_else(|error| match error.kind() {
-                    std::io::ErrorKind::AlreadyExists => Err(error),
-                    // Filesystems without hard links: check, then move.
-                    _ if self.path.exists() => {
-                        Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))
-                    }
-                    _ => std::fs::rename(&temporary, &self.path),
-                })
-            }
-        })();
-        let _ = std::fs::remove_file(&temporary);
-        result.map_err(|error| {
-            if error.kind() == std::io::ErrorKind::AlreadyExists {
+        let parent = match self.path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        let write_failed = |error: std::io::Error| {
+            self.failed(&format!("Writing the output file failed: {error}"))
+        };
+        let mut file = tempfile::Builder::new()
+            .prefix(".smbs-")
+            .suffix(".tmp")
+            .tempfile_in(parent)
+            .map_err(write_failed)?;
+        file.write_all(bytes).map_err(write_failed)?;
+        file.as_file().sync_all().map_err(write_failed)?;
+        let persisted = if self.overwrite {
+            file.persist(&self.path)
+        } else {
+            file.persist_noclobber(&self.path)
+        };
+        persisted.map(drop).map_err(|error| {
+            if error.error.kind() == std::io::ErrorKind::AlreadyExists {
                 self.failed("The output file appeared while smbs was running")
             } else {
-                self.failed(&format!("Writing the output file failed: {error}"))
+                write_failed(error.error)
             }
         })
     }
@@ -286,7 +297,11 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let existing = directory.join("rates.csv");
         std::fs::write(&existing, "keep").unwrap();
+        let subdirectory = directory.join("folder.csv");
+        std::fs::create_dir(&subdirectory).unwrap();
         for (path, overwrite) in [
+            (subdirectory.clone(), false),
+            (subdirectory, true),
             (directory.join("rates.txt"), false),
             (directory.join("rates"), false),
             (directory.join("missing").join("rates.csv"), false),
@@ -316,7 +331,12 @@ mod tests {
         // Another process creates the file after validation.
         std::fs::write(&path, "theirs").unwrap();
         let month = YearMonth::parse("2025-01", "m").unwrap();
-        assert!(target.write(&sample(Period::Month(month))).is_err());
+        let error = target.write(&sample(Period::Month(month))).unwrap_err();
+        assert!(
+            error.message.contains("appeared while smbs was running"),
+            "{}",
+            error.message
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs");
         assert_eq!(
             std::fs::read_dir(&directory).unwrap().count(),

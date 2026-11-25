@@ -785,14 +785,22 @@ fn output_problems_are_invalid_requests_or_output_failures() {
     }
     assert!(fixture.paths().is_empty());
 
-    // A directory in the way can only be found when publishing.
+    // A directory in the way is rejected up front, with or without --overwrite.
     let blocked = directory.join("blocked.csv");
     std::fs::create_dir(&blocked).unwrap();
-    let (output, value) = month_end_to(&fixture, &blocked, &["--overwrite"]);
-    assert_eq!(output.status.code(), Some(1), "{value}");
-    assert_eq!(value["error"]["code"], "output_failed");
-    assert_eq!(value["error"]["retryable"], false);
-    assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+    for extra in [&[][..], &["--overwrite"][..]] {
+        let (output, value) = month_end_to(&fixture, &blocked, extra);
+        assert_eq!(output.status.code(), Some(2), "{extra:?}: {value}");
+        assert_eq!(value["error"]["parameter"], "output");
+        assert!(
+            value["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("is a directory")
+        );
+    }
+    assert!(fixture.paths().is_empty());
+    assert!(blocked.is_dir());
 
     let (output, value) = run(&mut smbs(
         None,
@@ -811,6 +819,85 @@ fn output_problems_are_invalid_requests_or_output_failures() {
         output.status.code(),
         Some(2),
         "--overwrite needs --output: {value}"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn daily_xlsx_uses_day_dates_and_relative_paths_resolve() {
+    let fixture = Fixture::start(|_| {
+        xml(&chart(
+            "기간별 매매기준율",
+            &[("25.03.28", "1466.8"), ("25.03.31", "1466.5")],
+        ))
+    });
+    let directory = output_dir("daily-xlsx");
+    let (output, value) = run(smbs(
+        Some(&fixture),
+        &state_dir("output"),
+        Some("0"),
+        &[
+            "daily",
+            "--currency",
+            "USD",
+            "--from",
+            "2025-03-28",
+            "--to",
+            "2025-03-31",
+            "--output",
+            "march.xlsx",
+        ],
+    )
+    .current_dir(&directory));
+    assert_eq!(output.status.code(), Some(0), "{value}");
+    let path = directory.join("march.xlsx");
+    assert_eq!(
+        PathBuf::from(value["result"]["artifact"]["path"].as_str().unwrap()),
+        std::path::absolute(&path).unwrap()
+    );
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+    let mut read = |name: &str| {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name(name).unwrap(), &mut text).unwrap();
+        text
+    };
+    assert!(read("xl/workbook.xml").contains("name=\"daily\""));
+    // 2025-03-28 and 2025-03-31 as Excel serial dates, formatted as days.
+    let sheet = read("xl/worksheets/sheet1.xml");
+    assert!(
+        sheet.contains("<v>45744</v>") && sheet.contains("<v>45747</v>"),
+        "{sheet}"
+    );
+    assert!(read("xl/styles.xml").contains("formatCode=\"yyyy-mm-dd\""));
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn an_empty_series_still_writes_a_header_only_table() {
+    let fixture = Fixture::start(|_| xml(&chart("월평균 매매기준율", &[])));
+    let directory = output_dir("empty");
+    let path = directory.join("empty.csv");
+    let (output, value) = run(&mut smbs(
+        Some(&fixture),
+        &state_dir("output"),
+        Some("0"),
+        &[
+            "monthly-average",
+            "--currency",
+            "EUR",
+            "--from",
+            "2025-01",
+            "--to",
+            "2025-01",
+            "--output",
+            path.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(output.status.code(), Some(0), "{value}");
+    assert_eq!(value["result"]["artifact"]["rows"], 0);
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        "\u{feff}month,EUR\r\n".as_bytes()
     );
     std::fs::remove_dir_all(directory).unwrap();
 }
