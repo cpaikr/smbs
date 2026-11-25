@@ -18,12 +18,16 @@ doc = false
 
 [dependencies]
 clap.workspace = true
+rust_xlsxwriter.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
 smbs = { path = "../smbs", version = "0.1.0" }
 
 [dev-dependencies]
 encoding_rs.workspace = true
+zip.workspace = true
 
 [lints]
 workspace = true

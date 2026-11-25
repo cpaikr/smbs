@@ -658,3 +658,246 @@ fn each_endpoint_has_its_own_body_cap() {
     assert_eq!(output.status.code(), Some(0), "{value}");
     assert_eq!(value["result"]["series"][0]["observations"][0]["rate"], 1.5);
 }
+
+fn output_dir(name: &str) -> PathBuf {
+    let directory =
+        std::env::temp_dir().join(format!("smbs-cli-output-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    directory
+}
+
+fn two_currency_fixture() -> Fixture {
+    Fixture::start(|path| {
+        let rows: &[(&str, &str)] = if path.contains("JPY") {
+            &[("2025.02", "900.5")]
+        } else {
+            &[("2025.01", "1000.5"), ("2025.02", "1001.25")]
+        };
+        xml(&chart("월말 매매기준율", rows))
+    })
+}
+
+fn month_end_to(fixture: &Fixture, path: &std::path::Path, extra: &[&str]) -> (Output, Value) {
+    let path = path.to_str().unwrap();
+    let mut args = vec![
+        "month-end",
+        "--currency",
+        "USD,JPY",
+        "--from",
+        "2025-01",
+        "--to",
+        "2025-02",
+        "--output",
+        path,
+    ];
+    args.extend_from_slice(extra);
+    run(&mut smbs(
+        Some(fixture),
+        &state_dir("output"),
+        Some("0"),
+        &args,
+    ))
+}
+
+#[test]
+fn csv_output_is_a_wide_table_reported_in_the_envelope() {
+    let fixture = two_currency_fixture();
+    let directory = output_dir("csv");
+    let path = directory.join("rates.csv");
+    let (output, value) = month_end_to(&fixture, &path, &[]);
+    assert_eq!(output.status.code(), Some(0), "{value}");
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(
+        bytes,
+        "\u{feff}month,USD,JPY (100)\r\n2025-01,1000.5,\r\n2025-02,1001.25,900.5\r\n".as_bytes()
+    );
+    let artifact = &value["result"]["artifact"];
+    assert_eq!(artifact["format"], "csv");
+    assert_eq!(artifact["rows"], 2);
+    assert_eq!(artifact["bytes"], bytes.len());
+    assert_eq!(artifact["sha256"].as_str().unwrap().len(), 64);
+    assert!(PathBuf::from(artifact["path"].as_str().unwrap()).is_absolute());
+    // The JSON result still carries the series.
+    assert_eq!(value["result"]["series"].as_array().unwrap().len(), 2);
+
+    // No-clobber: the second run fails before any request and keeps the file.
+    let requests = fixture.paths().len();
+    let (output, value) = month_end_to(&fixture, &path, &[]);
+    assert_eq!(output.status.code(), Some(2), "{value}");
+    assert_eq!(value["error"]["parameter"], "output");
+    assert_eq!(fixture.paths().len(), requests);
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+
+    // --overwrite replaces it and leaves no temporary files behind.
+    std::fs::write(&path, "old").unwrap();
+    let (output, _) = month_end_to(&fixture, &path, &["--overwrite"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn xlsx_output_holds_numbers_and_dates() {
+    let fixture = two_currency_fixture();
+    let directory = output_dir("xlsx");
+    let path = directory.join("rates.XLSX");
+    let (output, value) = month_end_to(&fixture, &path, &[]);
+    assert_eq!(output.status.code(), Some(0), "{value}");
+    assert_eq!(value["result"]["artifact"]["format"], "xlsx");
+
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+    let read = |archive: &mut zip::ZipArchive<std::fs::File>, name: &str| {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name(name).unwrap(), &mut text).unwrap();
+        text
+    };
+    let workbook = read(&mut archive, "xl/workbook.xml");
+    assert!(workbook.contains("name=\"month-end\""), "{workbook}");
+    let sheet = read(&mut archive, "xl/worksheets/sheet1.xml");
+    for number in ["1000.5", "1001.25", "900.5"] {
+        assert!(
+            sheet.contains(&format!("<v>{number}</v>")),
+            "{number}: {sheet}"
+        );
+    }
+    // 2025-01-01 and 2025-02-01 as Excel serial dates.
+    assert!(
+        sheet.contains("<v>45658</v>") && sheet.contains("<v>45689</v>"),
+        "{sheet}"
+    );
+    assert!(sheet.contains("<pane ySplit=\"1\""), "header row is frozen");
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn output_problems_are_invalid_requests_or_output_failures() {
+    let fixture = two_currency_fixture();
+    let directory = output_dir("problems");
+    for path in [
+        directory.join("rates.txt"),
+        directory.join("missing").join("rates.csv"),
+    ] {
+        let (output, value) = month_end_to(&fixture, &path, &[]);
+        assert_eq!(output.status.code(), Some(2), "{value}");
+        assert_eq!(value["error"]["parameter"], "output");
+    }
+    assert!(fixture.paths().is_empty());
+
+    // A directory in the way is rejected up front, with or without --overwrite.
+    let blocked = directory.join("blocked.csv");
+    std::fs::create_dir(&blocked).unwrap();
+    for extra in [&[][..], &["--overwrite"][..]] {
+        let (output, value) = month_end_to(&fixture, &blocked, extra);
+        assert_eq!(output.status.code(), Some(2), "{extra:?}: {value}");
+        assert_eq!(value["error"]["parameter"], "output");
+        assert!(
+            value["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("is a directory")
+        );
+    }
+    assert!(fixture.paths().is_empty());
+    assert!(blocked.is_dir());
+
+    let (output, value) = run(&mut smbs(
+        None,
+        &state_dir("output"),
+        Some("0"),
+        &[
+            "month-end",
+            "--currency",
+            "USD",
+            "--from",
+            "2025-01",
+            "--overwrite",
+        ],
+    ));
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "--overwrite needs --output: {value}"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn daily_xlsx_uses_day_dates_and_relative_paths_resolve() {
+    let fixture = Fixture::start(|_| {
+        xml(&chart(
+            "기간별 매매기준율",
+            &[("25.03.28", "1466.8"), ("25.03.31", "1466.5")],
+        ))
+    });
+    let directory = output_dir("daily-xlsx");
+    let (output, value) = run(smbs(
+        Some(&fixture),
+        &state_dir("output"),
+        Some("0"),
+        &[
+            "daily",
+            "--currency",
+            "USD",
+            "--from",
+            "2025-03-28",
+            "--to",
+            "2025-03-31",
+            "--output",
+            "march.xlsx",
+        ],
+    )
+    .current_dir(&directory));
+    assert_eq!(output.status.code(), Some(0), "{value}");
+    let path = directory.join("march.xlsx");
+    assert_eq!(
+        PathBuf::from(value["result"]["artifact"]["path"].as_str().unwrap()),
+        std::path::absolute(&path).unwrap()
+    );
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+    let mut read = |name: &str| {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name(name).unwrap(), &mut text).unwrap();
+        text
+    };
+    assert!(read("xl/workbook.xml").contains("name=\"daily\""));
+    // 2025-03-28 and 2025-03-31 as Excel serial dates, formatted as days.
+    let sheet = read("xl/worksheets/sheet1.xml");
+    assert!(
+        sheet.contains("<v>45744</v>") && sheet.contains("<v>45747</v>"),
+        "{sheet}"
+    );
+    assert!(read("xl/styles.xml").contains("formatCode=\"yyyy-mm-dd\""));
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn an_empty_series_still_writes_a_header_only_table() {
+    let fixture = Fixture::start(|_| xml(&chart("월평균 매매기준율", &[])));
+    let directory = output_dir("empty");
+    let path = directory.join("empty.csv");
+    let (output, value) = run(&mut smbs(
+        Some(&fixture),
+        &state_dir("output"),
+        Some("0"),
+        &[
+            "monthly-average",
+            "--currency",
+            "EUR",
+            "--from",
+            "2025-01",
+            "--to",
+            "2025-01",
+            "--output",
+            path.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(output.status.code(), Some(0), "{value}");
+    assert_eq!(value["result"]["artifact"]["rows"], 0);
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        "\u{feff}month,EUR\r\n".as_bytes()
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}

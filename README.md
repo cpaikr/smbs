@@ -44,6 +44,40 @@ have no row. Failures print
 Exit status is 0 for success, 1 for an execution failure, and 2 for an invalid
 invocation. stderr stays empty.
 
+## CSV and Excel files
+
+Add `--output <path>` to any rate command to also write a table. The file
+extension picks the format.
+
+```sh
+smbs month-end --currency USD,JPY,EUR --from 2025-01 --to 2025-12 --output month-end-2025.xlsx
+smbs daily --currency USD,JPY --from 2025-03-01 --to 2025-03-31 --output march.csv
+```
+
+- **Layout:** one row per month or date, one column per currency. Headers show
+  the quote unit, for example `JPY (100)`. A cell is empty where a currency
+  has no rate.
+- **`.xlsx`:** rates are numbers and periods are real Excel dates (formatted
+  `yyyy-mm` or `yyyy-mm-dd`). The sheet is named after the command, the header
+  row is frozen, and a source line sits under the table.
+- **`.csv`:** UTF-8 with a BOM so Excel shows Korean text correctly, and CRLF
+  line endings.
+- **Existing files** are never replaced unless you pass `--overwrite`.
+  `--overwrite` swaps in a new file: a symlink at the path is replaced rather
+  than followed, and the old file's permissions are not kept. A wrong
+  extension, a missing directory, a directory at the path, or an existing
+  file without `--overwrite` is reported (exit 2) before any request is sent.
+- **Atomic writes:** the file is written under a temporary `.smbs-*.tmp` name
+  in the same directory and then moved into place, so a failed run never
+  leaves a partial file. Only a killed process can leave a `.smbs-*.tmp`
+  behind.
+- **Write failures:** if writing fails after the fetch, the error code is
+  `output_failed` (exit 1) and the fetched series are not returned. On
+  Windows, check that the file isn't open in Excel.
+
+The JSON on stdout still carries the series, plus
+`result.artifact = {path, format, bytes, sha256, rows}`.
+
 ## Request pacing
 
 `smbs` processes that share a state directory wait 1000 ms before each
