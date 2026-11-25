@@ -5,7 +5,7 @@
 
 mod clock;
 
-use std::{ffi::OsString, io::Write, process::ExitCode};
+use std::{ffi::OsString, fmt::Display, io::Write, process::ExitCode};
 
 use clap::{
     Args, Parser, Subcommand,
@@ -13,8 +13,8 @@ use clap::{
 };
 use serde::Serialize;
 use smbs::{
-    Basis, CURRENCIES, Client, Currency, ErrorCode, IntervalSource, PacingConfig, Series,
-    SeriesRequest, SmbsError, YearMonth, parse_interval_ms,
+    Basis, CURRENCIES, Client, Currency, DailyRequest, DailySeries, Date, ErrorCode,
+    IntervalSource, PacingConfig, Series, SeriesRequest, SmbsError, YearMonth, parse_interval_ms,
 };
 
 const CONTRACT_VERSION: &str = "1";
@@ -41,7 +41,18 @@ Notes:
   - The current month has no row until smbs.biz publishes it.
   - One request is sent per currency, paced; the command stops at the first failure.";
 
-/// Seoul Money Brokerage (smbs.biz) monthly KRW base rates (매매기준율).
+const DAILY_AFTER: &str = "\
+Examples:
+  smbs daily --currency USD --from 2025-01-01 --to 2025-12-31
+  smbs daily --currency USD,JPY --from 2025-11-01
+
+Notes:
+  - rate is KRW per `unit` units of the currency; JPY, IDR, and VND are quoted per 100.
+  - Only business days have rows; weekends and holidays are absent.
+  - A range may span at most 99 years (the source labels years with two digits).
+  - One request is sent per currency, paced; the command stops at the first failure.";
+
+/// Seoul Money Brokerage (smbs.biz) KRW base rates (매매기준율): monthly and daily.
 #[derive(Debug, Parser)]
 #[command(
     name = "smbs",
@@ -59,10 +70,13 @@ struct Cli {
 enum Command {
     /// Fetch 월평균 매매기준율 (monthly average base rate) series.
     #[command(after_help = SERIES_AFTER)]
-    MonthlyAverage(SeriesArgs),
+    MonthlyAverage(MonthlyArgs),
     /// Fetch 월말 매매기준율 (month-end base rate) series.
     #[command(after_help = SERIES_AFTER)]
-    MonthEnd(SeriesArgs),
+    MonthEnd(MonthlyArgs),
+    /// Fetch 기간별 매매기준율 (daily base rate) series.
+    #[command(after_help = DAILY_AFTER)]
+    Daily(DailyArgs),
     /// List supported currency codes, Korean names, and quote units (offline).
     Currencies(OutputArgs),
     /// Print the CLI version and contract version as JSON (offline).
@@ -70,7 +84,32 @@ enum Command {
 }
 
 #[derive(Debug, Args)]
-struct SeriesArgs {
+struct MonthlyArgs {
+    /// First month, YYYY-MM (1990-01 or later).
+    #[arg(long, value_name = "YYYY-MM", allow_hyphen_values = true)]
+    from: String,
+    /// Last month, YYYY-MM. Defaults to the current month in Korea.
+    #[arg(long, value_name = "YYYY-MM", allow_hyphen_values = true)]
+    to: Option<String>,
+    #[command(flatten)]
+    fetch: FetchArgs,
+}
+
+#[derive(Debug, Args)]
+struct DailyArgs {
+    /// First date, YYYY-MM-DD (1990-01-01 or later).
+    #[arg(long, value_name = "YYYY-MM-DD", allow_hyphen_values = true)]
+    from: String,
+    /// Last date, YYYY-MM-DD. Defaults to today in Korea.
+    #[arg(long, value_name = "YYYY-MM-DD", allow_hyphen_values = true)]
+    to: Option<String>,
+    #[command(flatten)]
+    fetch: FetchArgs,
+}
+
+/// Options shared by every command that contacts smbs.biz.
+#[derive(Debug, Args)]
+struct FetchArgs {
     /// Currency codes, comma-separated or repeated (e.g. USD,JPY). See `smbs currencies`.
     #[arg(
         long,
@@ -80,12 +119,6 @@ struct SeriesArgs {
         allow_hyphen_values = true
     )]
     currency: Vec<String>,
-    /// First month, YYYY-MM (1990-01 or later).
-    #[arg(long, value_name = "YYYY-MM", allow_hyphen_values = true)]
-    from: String,
-    /// Last month, YYYY-MM. Defaults to the current month in Korea.
-    #[arg(long, value_name = "YYYY-MM", allow_hyphen_values = true)]
-    to: Option<String>,
     /// Milliseconds to wait before each request (0-60000; default 1000).
     #[arg(long, value_name = "ms", allow_hyphen_values = true)]
     request_interval_ms: Option<String>,
@@ -149,6 +182,15 @@ struct SeriesResult {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DailyResult {
+    basis: &'static str,
+    from: Date,
+    to: Date,
+    series: Vec<DailySeries>,
+}
+
+#[derive(Serialize)]
 struct VersionResult {
     name: &'static str,
     version: &'static str,
@@ -187,9 +229,10 @@ fn main() -> ExitCode {
 
     match cli.command {
         Command::MonthlyAverage(args) => {
-            run_series("monthly-average", Basis::MonthlyAverage, &args)
+            run_monthly("monthly-average", Basis::MonthlyAverage, &args)
         }
-        Command::MonthEnd(args) => run_series("month-end", Basis::MonthEnd, &args),
+        Command::MonthEnd(args) => run_monthly("month-end", Basis::MonthEnd, &args),
+        Command::Daily(args) => run_daily(&args),
         Command::Currencies(args) => succeed(
             "currencies",
             CURRENCIES,
@@ -210,18 +253,97 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_series(operation: &'static str, basis: Basis, args: &SeriesArgs) -> ExitCode {
+fn run_monthly(operation: &'static str, basis: Basis, args: &MonthlyArgs) -> ExitCode {
+    run_fetch(
+        operation,
+        &args.fetch,
+        |currencies| {
+            let from = YearMonth::parse(&args.from, "from")?;
+            let to = match &args.to {
+                Some(to) => YearMonth::parse(to, "to")?,
+                None => clock::current_korea_month()?,
+            };
+            let requests = currencies
+                .iter()
+                .map(|currency| SeriesRequest::new(basis, currency, from, to))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((requests, (from, to)))
+        },
+        Client::fetch,
+        |series: &Series| {
+            series
+                .observations
+                .is_empty()
+                .then(|| empty_warning(series.currency, series.from, series.to))
+        },
+        |series, (from, to)| SeriesResult {
+            basis,
+            from,
+            to,
+            series,
+        },
+    )
+}
+
+fn run_daily(args: &DailyArgs) -> ExitCode {
+    run_fetch(
+        "daily",
+        &args.fetch,
+        |currencies| {
+            let from = Date::parse(&args.from, "from")?;
+            let to = match &args.to {
+                Some(to) => Date::parse(to, "to")?,
+                None => clock::current_korea_date()?,
+            };
+            let requests = currencies
+                .iter()
+                .map(|currency| DailyRequest::new(currency, from, to))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((requests, (from, to)))
+        },
+        Client::fetch_daily,
+        |series: &DailySeries| {
+            series
+                .observations
+                .is_empty()
+                .then(|| empty_warning(series.currency, series.from, series.to))
+        },
+        |series, (from, to)| DailyResult {
+            basis: "daily",
+            from,
+            to,
+            series,
+        },
+    )
+}
+
+fn empty_warning(currency: &str, from: impl Display, to: impl Display) -> String {
+    format!("smbs.biz returned no {currency} rows between {from} and {to}.")
+}
+
+/// Shared flow for commands that fetch one series per currency: validate every
+/// input, then resolve pacing, then fetch in order, stopping at the first failure.
+fn run_fetch<Request, Range, Fetched, Output: Serialize>(
+    operation: &'static str,
+    args: &FetchArgs,
+    prepare: impl FnOnce(&[&'static Currency]) -> Result<(Vec<Request>, Range), SmbsError>,
+    fetch: impl Fn(&Client, &Request) -> Result<Fetched, SmbsError>,
+    warning: impl Fn(&Fetched) -> Option<String>,
+    finish: impl FnOnce(Vec<Fetched>, Range) -> Output,
+) -> ExitCode {
     let pretty = args.output.pretty;
     // Validate every input before touching the pacing state or the network.
-    let prepared = prepare(basis, args).and_then(|requests| {
-        let explicit = args
-            .request_interval_ms
-            .as_deref()
-            .map(|value| parse_interval_ms(value, "request-interval-ms"))
-            .transpose()?;
-        PacingConfig::from_env(explicit).map(|pacing| (requests, pacing))
-    });
-    let (requests, pacing) = match prepared {
+    let prepared = parse_currencies(&args.currency)
+        .and_then(|currencies| prepare(&currencies))
+        .and_then(|(requests, range)| {
+            let explicit = args
+                .request_interval_ms
+                .as_deref()
+                .map(|value| parse_interval_ms(value, "request-interval-ms"))
+                .transpose()?;
+            PacingConfig::from_env(explicit).map(|pacing| (requests, range, pacing))
+        });
+    let (requests, range, pacing) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => return fail(Some(operation), error, Metadata::new(None), pretty),
     };
@@ -231,50 +353,33 @@ fn run_series(operation: &'static str, basis: Basis, args: &SeriesArgs) -> ExitC
     };
     let metadata = Metadata::new(Some(client.pacing()));
 
-    let mut series = Vec::with_capacity(requests.len());
+    let mut fetched = Vec::with_capacity(requests.len());
     for request in &requests {
-        match client.fetch(request) {
-            Ok(fetched) => series.push(fetched),
+        match fetch(&client, request) {
+            Ok(series) => fetched.push(series),
             Err(error) => return fail(Some(operation), error, metadata, pretty),
         }
     }
-    let warnings = series
-        .iter()
-        .filter(|s| s.observations.is_empty())
-        .map(|s| {
-            format!(
-                "smbs.biz returned no {} rows between {} and {}.",
-                s.currency, s.from, s.to
-            )
-        })
-        .collect();
-    let first = requests[0];
-    let result = SeriesResult {
-        basis,
-        from: first.from(),
-        to: first.to(),
-        series,
-    };
-    succeed(operation, result, metadata, warnings, pretty)
+    let warnings = fetched.iter().filter_map(&warning).collect();
+    succeed(
+        operation,
+        finish(fetched, range),
+        metadata,
+        warnings,
+        pretty,
+    )
 }
 
-fn prepare(basis: Basis, args: &SeriesArgs) -> Result<Vec<SeriesRequest>, SmbsError> {
-    let from = YearMonth::parse(&args.from, "from")?;
-    let to = match &args.to {
-        Some(to) => YearMonth::parse(to, "to")?,
-        None => clock::current_korea_month()?,
-    };
+/// Resolves codes against the catalog, dropping repeats but keeping order.
+fn parse_currencies(codes: &[String]) -> Result<Vec<&'static Currency>, SmbsError> {
     let mut currencies: Vec<&'static Currency> = Vec::new();
-    for code in &args.currency {
+    for code in codes {
         let currency = Currency::parse(code)?;
         if !currencies.contains(&currency) {
             currencies.push(currency);
         }
     }
-    currencies
-        .into_iter()
-        .map(|currency| SeriesRequest::new(basis, currency, from, to))
-        .collect()
+    Ok(currencies)
 }
 
 #[cfg(not(feature = "fixture-origin"))]
@@ -297,6 +402,7 @@ fn build_client(pacing: PacingConfig) -> Result<Client, SmbsError> {
 fn operation_name(argument: Option<&OsString>) -> Option<&'static str> {
     match argument?.to_str()? {
         "monthly-average" => Some("monthly-average"),
+        "daily" => Some("daily"),
         "month-end" => Some("month-end"),
         "currencies" => Some("currencies"),
         "version" => Some("version"),

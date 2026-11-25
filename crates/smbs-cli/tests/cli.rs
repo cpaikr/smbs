@@ -149,7 +149,13 @@ fn bare_invocation_is_byte_identical_to_help() {
     assert_eq!(bare.stdout, help.stdout);
     assert!(bare.stderr.is_empty());
     let text = String::from_utf8(bare.stdout).unwrap();
-    for command in ["monthly-average", "month-end", "currencies", "version"] {
+    for command in [
+        "monthly-average",
+        "month-end",
+        "daily",
+        "currencies",
+        "version",
+    ] {
         assert!(text.contains(command), "{command} missing from help");
     }
 }
@@ -508,4 +514,82 @@ fn offline_commands_need_no_source() {
         value["metadata"],
         serde_json::json!({"contractVersion": "1"})
     );
+}
+
+#[test]
+fn daily_returns_dated_rows_and_validates_dates_first() {
+    let fixture = Fixture::start(|path| {
+        assert!(
+            path.starts_with("/ExRate/StdExRate_xml.jsp?arr_value="),
+            "{path}"
+        );
+        xml(&chart(
+            "기간별 매매기준율",
+            &[("99.12.30", "1138"), ("00.01.04", "1128.5")],
+        ))
+    });
+    let (output, value) = run(&mut smbs(
+        Some(&fixture),
+        &state_dir("daily"),
+        Some("0"),
+        &[
+            "daily",
+            "--currency",
+            "usd",
+            "--from",
+            "1999-12-30",
+            "--to",
+            "2000-01-04",
+        ],
+    ));
+    assert_eq!(output.status.code(), Some(0), "{value}");
+    assert_eq!(
+        fixture.paths(),
+        ["/ExRate/StdExRate_xml.jsp?arr_value=USD_1999-12-30_2000-01-04"]
+    );
+    let result = &value["result"];
+    assert_eq!(value["operation"], "daily");
+    assert_eq!(result["basis"], "daily");
+    assert_eq!(result["from"], "1999-12-30");
+    assert_eq!(
+        result["series"][0]["observations"],
+        serde_json::json!([
+            {"date": "1999-12-30", "rate": 1138.0},
+            {"date": "2000-01-04", "rate": 1128.5},
+        ])
+    );
+
+    for (args, parameter) in [
+        (
+            &["daily", "--currency", "USD", "--from", "2025-02-30"][..],
+            "from",
+        ),
+        (
+            &["daily", "--currency", "USD", "--from", "2025-01"][..],
+            "from",
+        ),
+        (
+            &[
+                "daily",
+                "--currency",
+                "USD",
+                "--from",
+                "1990-01-01",
+                "--to",
+                "2090-01-01",
+            ][..],
+            "to",
+        ),
+    ] {
+        let (output, value) = run(&mut smbs(
+            Some(&fixture),
+            &state_dir("daily"),
+            Some("0"),
+            args,
+        ));
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {value}");
+        assert_eq!(value["operation"], "daily");
+        assert_eq!(value["error"]["parameter"], parameter, "{args:?}");
+    }
+    assert_eq!(fixture.paths().len(), 1, "invalid dates sent no request");
 }
