@@ -26,6 +26,7 @@
     $installDir = $env:SMBS_INSTALL_DIR
     if (-not $installDir) { $installDir = Join-Path $env:LOCALAPPDATA 'smbs\bin' }
 
+    $temporary = $null
     $work = Join-Path ([System.IO.Path]::GetTempPath()) ("smbs-install-" + [guid]::NewGuid())
     New-Item -ItemType Directory -Path $work | Out-Null
     try {
@@ -52,7 +53,8 @@
         if ($LASTEXITCODE -ne 0) { throw 'smbs install: the downloaded binary does not run on this system.' }
 
         New-Item -ItemType Directory -Force -Path $installDir | Out-Null
-        # Copy next to the destination, then rename over it.
+        # Copy next to the destination, then rename over it. Renaming fails
+        # while smbs.exe is running; the finally block removes the copy then.
         $temporary = Join-Path $installDir ".smbs.install.$PID.exe"
         Copy-Item -LiteralPath $staged -Destination $temporary -Force
         Move-Item -LiteralPath $temporary -Destination (Join-Path $installDir 'smbs.exe') -Force
@@ -60,10 +62,12 @@
         Write-Host "Installed smbs $version to $(Join-Path $installDir 'smbs.exe')"
         $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
         if (-not (($userPath -split ';') -contains $installDir)) {
-            Write-Host 'Add it to your user PATH (then open a new terminal):'
-            Write-Host "  [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path', 'User') + ';$installDir', 'User')"
+            $quoted = $installDir.Replace("'", "''")
+            Write-Host "$installDir is not on your user PATH. To add it permanently (then open a new terminal):"
+            Write-Host "  [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path', 'User') + ';$quoted', 'User')"
         }
     } finally {
         Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+        if ($temporary) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
     }
 }

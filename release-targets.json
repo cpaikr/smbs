@@ -1,9 +1,5 @@
 {
   "schemaVersion": 1,
-  "repository": "cpaikr/smbs",
-  "binaryName": "smbs",
-  "checksumFile": "SHA256SUMS",
-  "installers": ["install.sh", "install.ps1"],
   "targets": [
     {
       "key": "linux-x64-gnu",

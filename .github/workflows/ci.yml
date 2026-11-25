@@ -11,9 +11,11 @@ on:
 permissions:
   contents: read
 
+# Superseded pull request runs are cancelled. Runs on main are not: the
+# release gate needs a successful CI run on the exact tagged commit.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   checks:
@@ -25,11 +27,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           persist-credentials: false
-      - name: Select stable Rust
-        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt && rustup default stable
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
       - name: Format
         if: runner.os == 'Linux'
         run: cargo fmt --all --check
@@ -46,7 +48,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           persist-credentials: false
       - run: rustup toolchain install 1.89 --profile minimal

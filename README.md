@@ -17,12 +17,12 @@ toolchain, and each installer checks the SHA-256 hash of what it downloads.
 
 | Platform | Release target |
 | --- | --- |
-| Linux x64, glibc 2.35+ (Ubuntu 22.04+, Debian 12+) | `linux-x64-gnu` |
-| Linux arm64, glibc 2.35+ | `linux-arm64-gnu` |
+| Linux x64, glibc 2.34+ (Ubuntu 22.04+, Debian 12+, RHEL 9+) | `linux-x64-gnu` |
+| Linux arm64, glibc 2.34+ | `linux-arm64-gnu` |
 | macOS, Apple silicon | `darwin-arm64` |
 | Windows x64 | `windows-x64-msvc` |
 
-macOS and Linux:
+macOS and Linux (needs `curl` or `wget`, `tar`, and `sha256sum` or `shasum`):
 
 ```sh
 curl -fsSL https://github.com/cpaikr/smbs/releases/latest/download/install.sh | sh
@@ -36,7 +36,9 @@ irm https://github.com/cpaikr/smbs/releases/latest/download/install.ps1 | iex
 
 The binary goes to `~/.local/bin/smbs` or `%LOCALAPPDATA%\smbs\bin\smbs.exe`.
 Set `SMBS_INSTALL_DIR` to choose another directory. If that directory is not
-on `PATH`, the installer prints the command that adds it.
+on `PATH`, the installer prints how to add it. On macOS and Linux that is an
+`export` for the current shell plus the profile files that make it stick. On
+Windows it is the command that updates your user `PATH` permanently.
 
 Check the install:
 
@@ -50,7 +52,8 @@ To upgrade, run the installer again. To pin a version, replace
 
 ### Build from source
 
-Requires Rust 1.89 or later.
+Requires Rust 1.89 or later. `rust-toolchain.toml` pins the toolchain that CI
+and releases use.
 
 ```sh
 cargo build --release -p smbs-cli

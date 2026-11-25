@@ -1,0 +1,6 @@
+[toolchain]
+# Pinned so new lints or codegen never change CI or release binaries
+# unannounced; bump deliberately. rust-version (MSRV) stays 1.89.
+channel = "1.100.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"
