@@ -1,6 +1,7 @@
 # Architecture
 
-`smbs` has one Rust implementation of two read-only smbs.biz operations,
+`smbs` has one Rust implementation of three read-only smbs.biz operations
+(monthly average, month-end, and daily rates),
 shared by the SDK and the CLI. [README.md](README.md) owns commands and
 configuration; [docs/source-contract.md](docs/source-contract.md) owns observed
 wire behavior.
@@ -12,8 +13,10 @@ crates/smbs-cli (binary `smbs`)  ->  crates/smbs (SDK)  ->  http://www.smbs.biz
   argv, JSON envelope, exit status     validation, pacing, transport, parsing
 ```
 
-- [`crates/smbs`](crates/smbs/src/lib.rs): `Client`, `SeriesRequest`,
-  `PacingConfig`, the `Currency` table, and typed `SmbsError`s. Blocking I/O
+- [`crates/smbs`](crates/smbs/src/lib.rs): `Client`, `SeriesRequest` and
+  `DailyRequest`, `PacingConfig`, the `Currency` table, and typed
+  `SmbsError`s. [`chart.rs`](crates/smbs/src/chart.rs) holds the one chart
+  parser all three operations share. Blocking I/O
   only; there is no async runtime and no language binding.
 - [`crates/smbs-cli`](crates/smbs-cli/src/main.rs): a clap parser and the
   versioned process contract (`metadata.contractVersion`). It adds no parsing
@@ -22,19 +25,22 @@ crates/smbs-cli (binary `smbs`)  ->  crates/smbs (SDK)  ->  http://www.smbs.biz
 ## Request flow
 
 1. The CLI parses arguments. Every input is validated before pacing state or
-   the network is touched: currency against the allowlist, `YYYY-MM` months,
-   `from <= to`, `from >= 1990-01`, and the pacing interval.
-2. For each distinct currency in order, `Client::fetch`:
+   the network is touched: currency against the allowlist, `YYYY-MM` months
+   or `YYYY-MM-DD` dates, `from <= to`, `from` no earlier than 1990, daily
+   ranges of at most 99 years, and the pacing interval.
+2. For each distinct currency in order, `Client::fetch` or
+   `Client::fetch_daily`:
    1. acquires the pacing permit, waiting the interval under the lock;
    2. sends `GET <path>?arr_value=<CUR>_<from>_<end>` with no redirects
-      (5 s connect, 30 s total, 1 MiB body cap). `<end>` is `to` for monthly
-      averages and the month after `to` for month-end, whose endpoint
-      excludes its end month;
+      (5 s connect, 30 s total, and a body cap of 1 MiB monthly or 4 MiB
+      daily). `<end>` is `to`, except for month-end, where it is the month
+      after `to` because that endpoint excludes its end month;
    3. requires `200` and an XML media type (`text/xml` or `application/xml`),
       decodes EUC-KR strictly, and releases the permit;
-   4. parses the chart: only `<set>` and `<styles>` children, the caption
-      for the basis, `YYYY.MM` labels, positive plain decimals, strictly
-      ascending months, and the requested range.
+   4. parses the chart. It requires only `<set>` and `<styles>` children,
+      the caption for the basis, `YYYY.MM` (or daily `YY.MM.DD`) labels,
+      positive plain decimals, strictly ascending periods, and the requested
+      range.
 3. The command stops at the first failure. Its envelope carries the error
    code. Errors from contacting or parsing the source also carry the public
    `sourceUrl`; validation and pacing-state errors do not.

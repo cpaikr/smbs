@@ -51,6 +51,11 @@ impl Fixture {
                     .unwrap()
                     .push((Instant::now(), path.clone()));
                 let _ = stream.write_all(&responder(&path));
+                // Close gracefully: dropping a socket right after a large write
+                // can reset the connection before the client reads everything.
+                let _ = stream.shutdown(std::net::Shutdown::Write);
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                let _ = std::io::copy(&mut reader, &mut std::io::sink());
             }
         });
         Self { origin, requests }
@@ -149,7 +154,13 @@ fn bare_invocation_is_byte_identical_to_help() {
     assert_eq!(bare.stdout, help.stdout);
     assert!(bare.stderr.is_empty());
     let text = String::from_utf8(bare.stdout).unwrap();
-    for command in ["monthly-average", "month-end", "currencies", "version"] {
+    for command in [
+        "monthly-average",
+        "month-end",
+        "daily",
+        "currencies",
+        "version",
+    ] {
         assert!(text.contains(command), "{command} missing from help");
     }
 }
@@ -508,4 +519,142 @@ fn offline_commands_need_no_source() {
         value["metadata"],
         serde_json::json!({"contractVersion": "1"})
     );
+}
+
+#[test]
+fn daily_returns_dated_rows_and_validates_dates_first() {
+    let fixture = Fixture::start(|path| {
+        assert!(
+            path.starts_with("/ExRate/StdExRate_xml.jsp?arr_value="),
+            "{path}"
+        );
+        xml(&chart(
+            "기간별 매매기준율",
+            &[("99.12.30", "1138"), ("00.01.04", "1128.5")],
+        ))
+    });
+    let (output, value) = run(&mut smbs(
+        Some(&fixture),
+        &state_dir("daily"),
+        Some("0"),
+        &[
+            "daily",
+            "--currency",
+            "usd",
+            "--from",
+            "1999-12-30",
+            "--to",
+            "2000-01-04",
+        ],
+    ));
+    assert_eq!(output.status.code(), Some(0), "{value}");
+    assert_eq!(
+        fixture.paths(),
+        ["/ExRate/StdExRate_xml.jsp?arr_value=USD_1999-12-30_2000-01-04"]
+    );
+    let result = &value["result"];
+    assert_eq!(value["operation"], "daily");
+    assert_eq!(result["basis"], "daily");
+    assert_eq!(result["from"], "1999-12-30");
+    assert_eq!(result["to"], "2000-01-04");
+    let series = &result["series"][0];
+    assert_eq!(series["basis"], "daily");
+    assert_eq!(series["unit"], 1);
+    assert_eq!(
+        series["sourceUrl"],
+        "http://www.smbs.biz/ExRate/StdExRate_xml.jsp?arr_value=USD_1999-12-30_2000-01-04"
+    );
+    assert_eq!(
+        result["series"][0]["observations"],
+        serde_json::json!([
+            {"date": "1999-12-30", "rate": 1138.0},
+            {"date": "2000-01-04", "rate": 1128.5},
+        ])
+    );
+
+    for (args, parameter) in [
+        (
+            &["daily", "--currency", "USD", "--from", "2025-02-30"][..],
+            "from",
+        ),
+        (
+            &["daily", "--currency", "USD", "--from", "2025-01"][..],
+            "from",
+        ),
+        (
+            &[
+                "daily",
+                "--currency",
+                "USD",
+                "--from",
+                "1990-01-01",
+                "--to",
+                "2090-01-01",
+            ][..],
+            "to",
+        ),
+    ] {
+        let (output, value) = run(&mut smbs(
+            Some(&fixture),
+            &state_dir("daily"),
+            Some("0"),
+            args,
+        ));
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {value}");
+        assert_eq!(value["operation"], "daily");
+        assert_eq!(value["error"]["parameter"], parameter, "{args:?}");
+    }
+    assert_eq!(fixture.paths().len(), 1, "invalid dates sent no request");
+}
+
+#[test]
+fn each_endpoint_has_its_own_body_cap() {
+    // A valid chart padded to 2 MiB: over the monthly cap, under the daily cap.
+    let padded = |caption: &str, label: &str| {
+        let mut body = chart(caption, &[(label, "1.5")]);
+        let at = body.len() - b"</chart>\r\n".len();
+        body.splice(at..at, std::iter::repeat_n(b' ', 2 << 20));
+        xml(&body)
+    };
+    let monthly = Fixture::start(move |_| padded("월말 매매기준율", "2025.01"));
+    let (output, value) = run(&mut smbs(
+        Some(&monthly),
+        &state_dir("cap"),
+        Some("0"),
+        &[
+            "month-end",
+            "--currency",
+            "USD",
+            "--from",
+            "2025-01",
+            "--to",
+            "2025-01",
+        ],
+    ));
+    assert_eq!(output.status.code(), Some(1), "{value}");
+    assert_eq!(value["error"]["code"], "source_changed");
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("more than")
+    );
+
+    let daily = Fixture::start(move |_| padded("기간별 매매기준율", "25.01.02"));
+    let (output, value) = run(&mut smbs(
+        Some(&daily),
+        &state_dir("cap"),
+        Some("0"),
+        &[
+            "daily",
+            "--currency",
+            "USD",
+            "--from",
+            "2025-01-02",
+            "--to",
+            "2025-01-02",
+        ],
+    ));
+    assert_eq!(output.status.code(), Some(0), "{value}");
+    assert_eq!(value["result"]["series"][0]["observations"][0]["rate"], 1.5);
 }

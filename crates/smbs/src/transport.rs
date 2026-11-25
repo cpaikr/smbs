@@ -11,8 +11,10 @@ const USER_AGENT: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     " (+https://github.com/cpaikr/smbs)"
 );
-/// Observed chart documents are about 2 KB per decade of months.
-const BODY_LIMIT: u64 = 1 << 20;
+/// Monthly charts are about 2 KB per decade of months.
+pub(crate) const MONTHLY_BODY_LIMIT: u64 = 1 << 20;
+/// Daily charts are about 61 bytes per business day: 36 years is about 600 KB.
+pub(crate) const DAILY_BODY_LIMIT: u64 = 4 << 20;
 const MAX_RETRY_AFTER_SECONDS: u64 = 86_400;
 
 /// Fixed-origin HTTP GET returning EUC-KR-decoded text.
@@ -40,7 +42,12 @@ impl Transport {
     }
 
     /// Returns the public URL (always on smbs.biz, for citation) and the decoded body.
-    pub(crate) fn get(&self, path: &str, arr_value: &str) -> Result<(String, String), SmbsError> {
+    pub(crate) fn get(
+        &self,
+        path: &str,
+        arr_value: &str,
+        body_limit: u64,
+    ) -> Result<(String, String), SmbsError> {
         let path_and_query = format!("{path}?arr_value={arr_value}");
         let public_url = format!("{SMBS_ORIGIN}{path_and_query}");
         let unavailable =
@@ -79,15 +86,18 @@ impl Transport {
         let bytes = response
             .body_mut()
             .with_config()
-            .limit(BODY_LIMIT)
+            .limit(body_limit)
             .read_to_vec()
             .map_err(|error| match error {
                 ureq::Error::BodyExceedsLimit(_) => SmbsError::source(
                     ErrorCode::SourceChanged,
-                    format!("smbs.biz returned more than {BODY_LIMIT} bytes."),
+                    format!("smbs.biz returned more than {body_limit} bytes."),
                     &public_url,
                 ),
-                _ => unavailable("Reading the smbs.biz response failed.".to_owned()),
+                other => unavailable(truncate(
+                    &format!("Reading the smbs.biz response failed: {other}."),
+                    300,
+                )),
             })?;
         // The source answers malformed requests with an HTML error page; reject
         // that early, but accept either XML media type (RFC 7303).

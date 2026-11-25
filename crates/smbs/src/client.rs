@@ -1,7 +1,8 @@
 use crate::{
-    PacingConfig, Series, SeriesRequest, SmbsError,
+    DailyBasis, DailyRequest, DailySeries, PacingConfig, Series, SeriesRequest, SmbsError,
+    daily::{DAILY_PATH, parse_daily_chart},
     series::parse_chart,
-    transport::{SMBS_ORIGIN, Transport},
+    transport::{DAILY_BODY_LIMIT, MONTHLY_BODY_LIMIT, SMBS_ORIGIN, Transport},
 };
 
 /// Blocking smbs.biz client. Every request is paced through [`PacingConfig`].
@@ -53,13 +54,11 @@ impl Client {
     /// Source errors (`source_unavailable`, `source_changed`,
     /// `source_parse_failure`) or `internal_error` when pacing state fails.
     pub fn fetch(&self, request: &SeriesRequest) -> Result<Series, SmbsError> {
-        let permit = self.pacing.acquire()?;
-        let response = self
-            .transport
-            .get(request.basis().path(), &request.arr_value());
-        // Hold the pacing lock until the response is fully read.
-        drop(permit);
-        let (source_url, text) = response?;
+        let (source_url, text) = self.get(
+            request.basis().path(),
+            &request.arr_value(),
+            MONTHLY_BODY_LIMIT,
+        )?;
         let observations = parse_chart(&text, request, &source_url)?;
         let currency = request.currency();
         Ok(Series {
@@ -72,5 +71,38 @@ impl Client {
             observations,
             source_url,
         })
+    }
+
+    /// Fetches one currency's daily series (기간별 매매기준율).
+    ///
+    /// # Errors
+    /// As [`Client::fetch`].
+    pub fn fetch_daily(&self, request: &DailyRequest) -> Result<DailySeries, SmbsError> {
+        let (source_url, text) = self.get(DAILY_PATH, &request.arr_value(), DAILY_BODY_LIMIT)?;
+        let observations = parse_daily_chart(&text, request, &source_url)?;
+        let currency = request.currency();
+        Ok(DailySeries {
+            basis: DailyBasis::Daily,
+            currency: currency.code,
+            name: currency.name,
+            unit: currency.unit,
+            from: request.from(),
+            to: request.to(),
+            observations,
+            source_url,
+        })
+    }
+
+    /// One paced request: the pacing lock is held until the body is fully read.
+    fn get(
+        &self,
+        path: &str,
+        arr_value: &str,
+        body_limit: u64,
+    ) -> Result<(String, String), SmbsError> {
+        let permit = self.pacing.acquire()?;
+        let response = self.transport.get(path, arr_value, body_limit);
+        drop(permit);
+        response
     }
 }
