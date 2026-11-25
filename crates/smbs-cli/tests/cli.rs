@@ -152,7 +152,7 @@ fn bare_invocation_is_byte_identical_to_help() {
         .unwrap();
     assert_eq!(bare.status.code(), Some(0));
     assert_eq!(bare.stdout, help.stdout);
-    assert!(bare.stderr.is_empty());
+    assert_eq!(bare.stderr, b"");
     let text = String::from_utf8(bare.stdout).unwrap();
     for command in [
         "monthly-average",
@@ -375,7 +375,7 @@ fn invalid_invocations_exit_2_without_requests() {
             "{args:?}: {value}"
         );
     }
-    assert!(fixture.paths().is_empty());
+    assert_eq!(fixture.paths(), Vec::<String>::new());
 }
 
 #[test]
@@ -515,6 +515,7 @@ fn offline_commands_need_no_source() {
     let (output, value) = run(&mut smbs(None, &state_dir("offline"), None, &["version"]));
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(value["result"]["version"], env!("CARGO_PKG_VERSION"));
+    assert!(value["result"]["target"].as_str().unwrap().contains('-'));
     assert_eq!(
         value["metadata"],
         serde_json::json!({"contractVersion": "1"})
@@ -783,7 +784,7 @@ fn output_problems_are_invalid_requests_or_output_failures() {
         assert_eq!(output.status.code(), Some(2), "{value}");
         assert_eq!(value["error"]["parameter"], "output");
     }
-    assert!(fixture.paths().is_empty());
+    assert_eq!(fixture.paths(), Vec::<String>::new());
 
     // A directory in the way is rejected up front, with or without --overwrite.
     let blocked = directory.join("blocked.csv");
@@ -799,7 +800,7 @@ fn output_problems_are_invalid_requests_or_output_failures() {
                 .contains("is a directory")
         );
     }
-    assert!(fixture.paths().is_empty());
+    assert_eq!(fixture.paths(), Vec::<String>::new());
     assert!(blocked.is_dir());
 
     let (output, value) = run(&mut smbs(

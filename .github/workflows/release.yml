@@ -1,0 +1,256 @@
+name: Release
+
+# Publish: dispatch this workflow on a vX.Y.Z tag with `publish: true`
+#   gh workflow run release.yml --ref vX.Y.Z -f publish=true
+# so the workflow, scripts, and sources all come from the tagged commit.
+# Any other run (another ref, publish false, or a pull request touching
+# release files) is a build-only candidate: every target is built, packaged,
+# installed, and checked, and nothing is published. See docs/release.md.
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish a release (only when run on a vX.Y.Z tag)
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - release-targets.json
+      - rust-toolchain.toml
+      - .cargo/**
+      - scripts/install/**
+      - scripts/release/**
+      - .github/workflows/release.yml
+      - Cargo.toml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      ref: ${{ steps.meta.outputs.ref }}
+      publish: ${{ steps.meta.outputs.publish }}
+      matrix: ${{ steps.meta.outputs.matrix }}
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Resolve version and release gates
+        id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLISH: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[] | select(.name == "smbs-cli") | .version')"
+          sha="$(git rev-parse HEAD)"
+          publish=false
+          if [ "$PUBLISH" = "true" ]; then
+            # triggering_actor is whoever started this attempt, including re-runs.
+            [ "$TRIGGERING_ACTOR" = "sjunepark" ] || { echo "only the maintainer publishes releases" >&2; exit 1; }
+            [ "$REF_TYPE" = "tag" ] || { echo "publish by dispatching on a vX.Y.Z tag (--ref vX.Y.Z)" >&2; exit 1; }
+            [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag must be vX.Y.Z" >&2; exit 1; }
+            [ "$REF_NAME" = "v${version}" ] || { echo "tag $REF_NAME does not match Cargo version $version" >&2; exit 1; }
+            git merge-base --is-ancestor "$sha" origin/main || { echo "$REF_NAME is not on main" >&2; exit 1; }
+            ci="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$sha" --event push --json conclusion --jq '[.[] | select(.conclusion == "success")] | length')"
+            [ "$ci" -gt 0 ] || { echo "no successful CI push run for $sha; re-run CI on main if it was cancelled" >&2; exit 1; }
+            publish=true
+          fi
+          {
+            echo "version=${version}"
+            echo "ref=${sha}"
+            echo "publish=${publish}"
+            echo "matrix=$(jq -c '{include: .targets}' release-targets.json)"
+          } >> "$GITHUB_OUTPUT"
+          echo "version ${version}, commit ${sha}, publish ${publish}"
+
+  build:
+    needs: prepare
+    name: build (${{ matrix.key }})
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      ASSET: smbs-${{ needs.prepare.outputs.version }}-${{ matrix.key }}.${{ matrix.archive }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.ref }}
+      - name: Build
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup target add "${{ matrix.rustTarget }}"
+          cargo build --release --locked -p smbs-cli --target "${{ matrix.rustTarget }}"
+          mkdir stage
+          cp "target/${{ matrix.rustTarget }}/release/${{ matrix.executable }}" LICENSE.md stage/
+      - name: Report glibc requirement
+        if: runner.os == 'Linux'
+        run: objdump -T stage/smbs | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
+      - name: Package (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        run: tar -czf "$ASSET" -C stage "${{ matrix.executable }}" LICENSE.md
+      - name: Package (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: Compress-Archive -Path stage/* -DestinationPath $env:ASSET
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: archive-${{ matrix.key }}
+          path: ${{ env.ASSET }}
+          if-no-files-found: error
+
+  assemble:
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.ref }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: archive-*
+          merge-multiple: true
+          path: archives
+      - run: bash scripts/release/assemble.sh "${{ needs.prepare.outputs.version }}" archives dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets
+          path: dist/
+          if-no-files-found: error
+
+  verify:
+    needs: [prepare, assemble]
+    name: verify (${{ matrix.key }})
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      RUST_TARGET: ${{ matrix.rustTarget }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets
+          path: dist
+      - name: Install with install.sh and run the binary
+        if: runner.os != 'Windows'
+        run: |
+          set -eu
+          cd dist
+          if command -v sha256sum >/dev/null; then sha256sum -c SHA256SUMS; else shasum -a 256 -c SHA256SUMS; fi
+          SMBS_ARCHIVE_DIR="$PWD" SMBS_INSTALL_DIR="$RUNNER_TEMP/bin" sh ./install.sh
+          bin="$RUNNER_TEMP/bin/smbs"
+          "$bin" --version | grep -Fx "smbs ${VERSION}"
+          "$bin" --help | grep -q daily
+          "$bin" currencies | jq -e '.ok and (.result | length) == 58'
+          "$bin" version | jq -e --arg target "$RUST_TARGET" '.result.target == $target'
+          ls -A "$RUNNER_TEMP/bin" | grep -Fx smbs
+      - name: Install with install.ps1 (PowerShell 7) and run the binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:SMBS_ARCHIVE_DIR = (Resolve-Path dist).Path
+          $env:SMBS_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'bin'
+          Get-Content dist/install.ps1 -Raw | Invoke-Expression
+          $bin = Join-Path $env:SMBS_INSTALL_DIR 'smbs.exe'
+          if ((& $bin --version) -ne "smbs $env:VERSION") { throw 'unexpected --version output' }
+          $help = (& $bin --help) -join "`n"
+          if ($LASTEXITCODE -ne 0 -or -not $help.Contains('daily')) { throw '--help failed or omits daily' }
+          $currencies = & $bin currencies | ConvertFrom-Json
+          if (-not $currencies.ok -or $currencies.result.Count -ne 58) { throw 'currencies failed' }
+          $version = & $bin version | ConvertFrom-Json
+          if ($version.result.target -ne $env:RUST_TARGET) { throw 'unexpected build target' }
+          # The C runtime is linked statically, so no VC++ redistributable is needed.
+          $bytes = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($bin))
+          if ($bytes.Contains('VCRUNTIME140')) { throw 'smbs.exe imports VCRUNTIME140.dll' }
+          if ((Get-ChildItem -Force $env:SMBS_INSTALL_DIR).Name -ne 'smbs.exe') { throw 'installer left extra files' }
+      - name: Install with install.ps1 (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:SMBS_ARCHIVE_DIR = (Resolve-Path dist).Path
+          $env:SMBS_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'bin51'
+          Get-Content dist/install.ps1 -Raw | Invoke-Expression
+          $bin = Join-Path $env:SMBS_INSTALL_DIR 'smbs.exe'
+          if ((& $bin --version) -ne "smbs $env:VERSION") { throw 'unexpected --version output' }
+
+  publish:
+    needs: [prepare, verify]
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+      BUILT_REF: ${{ needs.prepare.outputs.ref }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets
+          path: dist
+      - name: Check the tag and existing releases
+        run: |
+          set -euo pipefail
+          # The tag must still point at the commit the assets were built from.
+          tagged="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${TAG}" --jq .sha)"
+          [ "$tagged" = "$BUILT_REF" ] || { echo "$TAG moved from $BUILT_REF to $tagged" >&2; exit 1; }
+          # With a write token, drafts are visible too: never create a second release.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "a release or draft for $TAG already exists; delete a stale draft or ship a new version" >&2
+            exit 1
+          fi
+      - name: Publish
+        run: |
+          set -euo pipefail
+          cat > notes.md <<EOF
+          Install or upgrade (Linux x64/arm64, macOS Apple silicon):
+
+              curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/install.sh | sh
+
+          Windows x64 (PowerShell):
+
+              irm https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/install.ps1 | iex
+
+          Verify downloads with SHA256SUMS. See the README for what changed and how to use it.
+          EOF
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "smbs ${TAG}" --notes-file notes.md
+          # Compare what GitHub stored with what was verified, then publish.
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir uploaded
+          (cd dist && sha256sum -- * | sort -k 2) > expected.txt
+          (cd uploaded && sha256sum -- * | sort -k 2) > actual.txt
+          diff expected.txt actual.txt
+          # Only a version above the current latest becomes "latest", so a
+          # backport never downgrades the one-line installer.
+          latest="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName 2>/dev/null || true)"
+          make_latest=true
+          if [ -n "$latest" ] && [ "$(printf '%s\n%s\n' "${latest#v}" "${TAG#v}" | sort -V | tail -1)" != "${TAG#v}" ]; then
+            make_latest=false
+          fi
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest="$make_latest"

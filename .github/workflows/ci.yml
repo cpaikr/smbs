@@ -1,0 +1,55 @@
+name: CI
+
+# Pull requests run on Linux. Pushes to main and manual runs cover every
+# release platform, because request pacing relies on OS file locks.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Superseded pull request runs are cancelled. Runs on main are not: the
+# release gate needs a successful CI run on the exact tagged commit.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  checks:
+    name: checks (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["ubuntu-24.04", "macos-15", "windows-2025"]') }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - name: Format
+        if: runner.os == 'Linux'
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked
+      - name: Test
+        run: cargo test --workspace --all-features --locked
+      - name: Shell scripts
+        if: runner.os == 'Linux'
+        run: shellcheck --shell=sh scripts/install/install.sh.in && shellcheck scripts/release/assemble.sh
+
+  msrv:
+    name: minimum Rust (1.89)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.89 --profile minimal
+      - run: cargo +1.89 check --workspace --all-targets --all-features --locked

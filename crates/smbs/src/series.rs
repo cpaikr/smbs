@@ -209,7 +209,7 @@ mod tests {
             URL,
         )
         .unwrap();
-        assert!(observations.is_empty());
+        assert_eq!(observations, []);
     }
 
     #[test]

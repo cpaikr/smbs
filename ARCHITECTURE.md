@@ -96,3 +96,11 @@ crates/smbs-cli (binary `smbs`)  ->  crates/smbs (SDK)  ->  http://www.smbs.biz
   `rate_limited`, and a numeric `Retry-After` appears in `recoveryHint`. Both
   are retryable. A redirect or other 4xx is `source_changed` and is not
   retryable. Nothing retries automatically.
+
+## Distribution
+
+Releases are built and published by
+[`release.yml`](.github/workflows/release.yml) from the target list in
+[`release-targets.json`](release-targets.json). The process and its gates
+are in [docs/release.md](docs/release.md). `smbs version` reports the build
+target, which `crates/smbs-cli/build.rs` records at compile time.

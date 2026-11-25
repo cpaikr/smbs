@@ -9,16 +9,59 @@ no login and does not use the Excel export. See the
 [source contract](docs/source-contract.md) for observed wire behavior and
 [ARCHITECTURE.md](ARCHITECTURE.md) for boundaries and request pacing.
 
-## Build
+## Install
 
-Requires Rust 1.89 or later.
+Prebuilt binaries come from
+[GitHub Releases](https://github.com/cpaikr/smbs/releases). They need no Rust
+toolchain, and each installer checks the SHA-256 hash of what it downloads.
+
+| Platform | Release target |
+| --- | --- |
+| Linux x64, glibc 2.34+ (Ubuntu 22.04+, Debian 12+, RHEL 9+) | `linux-x64-gnu` |
+| Linux arm64, glibc 2.34+ | `linux-arm64-gnu` |
+| macOS, Apple silicon | `darwin-arm64` |
+| Windows x64 | `windows-x64-msvc` |
+
+macOS and Linux (needs `curl` or `wget`, `tar`, and `sha256sum` or `shasum`):
+
+```sh
+curl -fsSL https://github.com/cpaikr/smbs/releases/latest/download/install.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://github.com/cpaikr/smbs/releases/latest/download/install.ps1 | iex
+```
+
+The binary goes to `~/.local/bin/smbs` or `%LOCALAPPDATA%\smbs\bin\smbs.exe`.
+Set `SMBS_INSTALL_DIR` to choose another directory. If that directory is not
+on `PATH`, the installer prints how to add it. On macOS and Linux that is an
+`export` for the current shell plus the profile files that make it stick. On
+Windows it is the command that updates your user `PATH` permanently.
+
+Check the install:
+
+```sh
+smbs --version
+smbs --help
+```
+
+To upgrade, run the installer again. To pin a version, replace
+`latest/download` with `download/vX.Y.Z`. There is no self-update command.
+
+### Build from source
+
+Requires Rust 1.89 or later. `rust-toolchain.toml` pins the toolchain that CI
+and releases use.
 
 ```sh
 cargo build --release -p smbs-cli
 ```
 
-This builds `target/release/smbs` (`smbs.exe` on Windows). The examples below
-assume that binary is on `PATH`; otherwise call it by that path.
+This builds `target/release/smbs` (`smbs.exe` on Windows). The examples
+below call `smbs`, so either put `target/release` on `PATH` or call the
+binary by its path.
 
 ## Commands
 
