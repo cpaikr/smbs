@@ -1,0 +1,29 @@
+[package]
+name = "smbs-cli"
+description = "Standalone command-line interface for the smbs Rust SDK"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# Reads SMBS_FIXTURE_ORIGIN so process tests can use a loopback server.
+fixture-origin = ["smbs/fixture-origin"]
+
+[[bin]]
+name = "smbs"
+path = "src/main.rs"
+doc = false
+
+[dependencies]
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+smbs = { path = "../smbs", version = "0.1.0" }
+
+[dev-dependencies]
+encoding_rs.workspace = true
+
+[lints]
+workspace = true
