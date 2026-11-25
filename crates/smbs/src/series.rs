@@ -97,8 +97,18 @@ impl SeriesRequest {
 
     /// The source's `arr_value` query value, e.g. `USD_2025-01_2025-12`.
     /// Only ASCII letters, digits, `-`, and `_`, so it needs no escaping.
+    ///
+    /// The month-end endpoint treats its end month as exclusive (observed
+    /// 2026-11-25: `USD_2025-01_2025-03` returns only 2025.01 and 2025.02),
+    /// while the monthly-average endpoint includes it. Sending the following
+    /// month keeps `to` inclusive for both bases; `parse_chart` still rejects
+    /// rows after `to`.
     pub(crate) fn arr_value(&self) -> String {
-        format!("{}_{}_{}", self.currency.code, self.from, self.to)
+        let end = match self.basis {
+            Basis::MonthlyAverage => self.to,
+            Basis::MonthEnd => self.to.next().unwrap_or(self.to),
+        };
+        format!("{}_{}_{}", self.currency.code, self.from, end)
     }
 }
 
@@ -298,13 +308,24 @@ mod tests {
         let usd = Currency::parse("usd").unwrap();
         let jan = YearMonth::new(2025, 1).unwrap();
         let dec = YearMonth::new(2025, 12).unwrap();
-        assert_eq!(
-            SeriesRequest::new(Basis::MonthEnd, usd, jan, dec)
+        let arr_value = |basis, from, to| {
+            SeriesRequest::new(basis, usd, from, to)
                 .unwrap()
-                .arr_value(),
+                .arr_value()
+        };
+        assert_eq!(
+            arr_value(Basis::MonthlyAverage, jan, dec),
             "USD_2025-01_2025-12"
         );
-        assert!(SeriesRequest::new(Basis::MonthEnd, usd, jan, jan).is_ok());
+        // The month-end endpoint's end month is exclusive, so the next month is sent.
+        assert_eq!(arr_value(Basis::MonthEnd, jan, dec), "USD_2025-01_2026-01");
+        assert_eq!(arr_value(Basis::MonthEnd, jan, jan), "USD_2025-01_2025-02");
+        let last = YearMonth::new(9999, 12).unwrap();
+        assert_eq!(
+            arr_value(Basis::MonthEnd, last, last),
+            "USD_9999-12_9999-12"
+        );
+        assert_eq!(last.next(), None);
         assert_eq!(
             SeriesRequest::new(Basis::MonthEnd, usd, dec, jan)
                 .unwrap_err()

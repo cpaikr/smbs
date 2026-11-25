@@ -193,8 +193,8 @@ fn month_end_returns_paced_series_for_each_currency() {
     assert_eq!(
         fixture.paths(),
         [
-            "/ExRate/MonLastStdExRate_xml.jsp?arr_value=USD_2025-01_2025-03",
-            "/ExRate/MonLastStdExRate_xml.jsp?arr_value=JPY_2025-01_2025-03",
+            "/ExRate/MonLastStdExRate_xml.jsp?arr_value=USD_2025-01_2025-04",
+            "/ExRate/MonLastStdExRate_xml.jsp?arr_value=JPY_2025-01_2025-04",
         ]
     );
     assert_eq!(value["ok"], true);
@@ -213,7 +213,7 @@ fn month_end_returns_paced_series_for_each_currency() {
     assert_eq!(series[0]["unit"], 1);
     assert_eq!(
         series[0]["sourceUrl"],
-        "http://www.smbs.biz/ExRate/MonLastStdExRate_xml.jsp?arr_value=USD_2025-01_2025-03"
+        "http://www.smbs.biz/ExRate/MonLastStdExRate_xml.jsp?arr_value=USD_2025-01_2025-04"
     );
     assert_eq!(
         series[0]["observations"],
@@ -434,7 +434,7 @@ fn source_failures_are_classified_and_exit_1() {
         assert_eq!(value["error"]["retryable"], retryable, "case {index}");
         assert_eq!(
             value["error"]["sourceUrl"],
-            "http://www.smbs.biz/ExRate/MonLastStdExRate_xml.jsp?arr_value=USD_2025-01_2025-02"
+            "http://www.smbs.biz/ExRate/MonLastStdExRate_xml.jsp?arr_value=USD_2025-01_2025-03"
         );
         if index == 4 {
             let hint = value["error"]["recoveryHint"].as_str().unwrap();
