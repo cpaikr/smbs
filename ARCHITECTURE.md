@@ -19,8 +19,12 @@ crates/smbs-cli (binary `smbs`)  ->  crates/smbs (SDK)  ->  http://www.smbs.biz
   parser all three operations share. Blocking I/O
   only; there is no async runtime and no language binding.
 - [`crates/smbs-cli`](crates/smbs-cli/src/main.rs): a clap parser and the
-  versioned process contract (`metadata.contractVersion`). It adds no parsing
-  of its own.
+  versioned process contract (`metadata.contractVersion`). It adds no source
+  parsing of its own. [`table.rs`](crates/smbs-cli/src/table.rs) turns
+  fetched series into a wide table, and
+  [`output.rs`](crates/smbs-cli/src/output.rs) renders it as CSV or XLSX and
+  publishes the file. Writing files is a CLI concern, so the SDK never
+  touches the filesystem except for the pacing lock.
 
 ## Request flow
 
@@ -75,6 +79,13 @@ crates/smbs-cli (binary `smbs`)  ->  crates/smbs (SDK)  ->  http://www.smbs.biz
   process still waiting for the lock does not slow other processes until it
   gets the lock. Library callers configure pacing with `PacingConfig::new`;
   `PacingConfig::from_env` adds the environment variables.
+- **Output files are validated first and published atomically.** The
+  extension, parent directory, and no-clobber check run with the other
+  validation, before any request. The table is written to a temporary file in
+  the target directory, flushed, then moved into place. Without
+  `--overwrite`, the move is a hard link, which fails if the file appeared in
+  the meantime, so another program's file is never replaced. A failure after
+  the fetch is the CLI's own `output_failed` code (exit 1).
 - **Errors say whether a retry can help.** A transport failure, timeout, 408,
   or any other 5xx is `source_unavailable`. A 429, or a 503 with `Retry-After`, is
   `rate_limited`, and a numeric `Retry-After` appears in `recoveryHint`. Both

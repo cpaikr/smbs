@@ -1,6 +1,6 @@
 # Plan: daily rates, CSV/Excel output, release binaries
 
-Status: approved 2026-11-25. PR A is in review (#4); PR B and PR C are next.
+Status: approved 2026-11-25. PR A merged (#4); PR B in review; PR C next.
 
 Three PRs, in this order, then a `v0.2.0` release. Each PR updates README,
 ARCHITECTURE, and the source contract for what it changes.

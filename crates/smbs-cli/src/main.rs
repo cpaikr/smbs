@@ -4,18 +4,22 @@
 //! stderr stays empty; help and `--version` are plain text on stdout.
 
 mod clock;
+mod output;
+mod table;
 
-use std::{ffi::OsString, fmt::Display, io::Write, process::ExitCode};
+use std::{ffi::OsString, fmt::Display, io::Write, path::PathBuf, process::ExitCode};
 
 use clap::{
     Args, Parser, Subcommand,
     error::{ContextKind, ContextValue, ErrorKind},
 };
+use output::{Artifact, OutputTarget};
 use serde::Serialize;
 use smbs::{
     Basis, CURRENCIES, Client, Currency, DailyBasis, DailyRequest, DailySeries, Date, ErrorCode,
     IntervalSource, PacingConfig, Series, SeriesRequest, SmbsError, YearMonth, parse_interval_ms,
 };
+use table::Table;
 
 const CONTRACT_VERSION: &str = "1";
 
@@ -122,8 +126,14 @@ struct FetchArgs {
     /// Milliseconds to wait before each request (0-60000; default 1000).
     #[arg(long, value_name = "ms", allow_hyphen_values = true)]
     request_interval_ms: Option<String>,
+    /// Also write the rates as a table to this .csv or .xlsx file.
+    #[arg(long, value_name = "path", allow_hyphen_values = true)]
+    output: Option<PathBuf>,
+    /// Replace the --output file if it already exists.
+    #[arg(long, requires = "output")]
+    overwrite: bool,
     #[command(flatten)]
-    output: OutputArgs,
+    json: OutputArgs,
 }
 
 #[derive(Debug, Args)]
@@ -148,8 +158,58 @@ struct Success<T: Serialize> {
 struct Failure {
     ok: bool,
     operation: Option<&'static str>,
-    error: SmbsError,
+    error: CliError,
     metadata: Metadata,
+}
+
+/// The envelope's error: an SDK error, or a failure the CLI itself owns.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliError {
+    code: CliErrorCode,
+    message: String,
+    retryable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parameter: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery_hint: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CliErrorCode {
+    /// Writing the --output file failed after the rates were fetched.
+    OutputFailed,
+    #[serde(untagged)]
+    Sdk(ErrorCode),
+}
+
+impl CliError {
+    fn output_failed(message: String, recovery_hint: &str) -> Self {
+        Self {
+            code: CliErrorCode::OutputFailed,
+            message,
+            retryable: false,
+            parameter: None,
+            source_url: None,
+            recovery_hint: Some(recovery_hint.to_owned()),
+        }
+    }
+}
+
+impl From<SmbsError> for CliError {
+    fn from(error: SmbsError) -> Self {
+        Self {
+            code: CliErrorCode::Sdk(error.code),
+            message: error.message,
+            retryable: error.retryable,
+            parameter: error.parameter,
+            source_url: error.source_url,
+            recovery_hint: error.recovery_hint,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -179,6 +239,8 @@ struct SeriesResult {
     from: YearMonth,
     to: YearMonth,
     series: Vec<Series>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact: Option<Artifact>,
 }
 
 #[derive(Serialize)]
@@ -188,6 +250,8 @@ struct DailyResult {
     from: Date,
     to: Date,
     series: Vec<DailySeries>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact: Option<Artifact>,
 }
 
 #[derive(Serialize)]
@@ -276,11 +340,13 @@ fn run_monthly(operation: &'static str, basis: Basis, args: &MonthlyArgs) -> Exi
                 .is_empty()
                 .then(|| empty_warning(series.currency, series.from, series.to))
         },
-        |series, (from, to)| SeriesResult {
+        |series| Table::monthly(basis, series),
+        |series, (from, to), artifact| SeriesResult {
             basis,
             from,
             to,
             series,
+            artifact,
         },
     )
 }
@@ -308,11 +374,13 @@ fn run_daily(args: &DailyArgs) -> ExitCode {
                 .is_empty()
                 .then(|| empty_warning(series.currency, series.from, series.to))
         },
-        |series, (from, to)| DailyResult {
+        Table::daily,
+        |series, (from, to), artifact| DailyResult {
             basis: DailyBasis::Daily,
             from,
             to,
             series,
+            artifact,
         },
     )
 }
@@ -329,21 +397,27 @@ fn run_fetch<Request, Range, Fetched, Output: Serialize>(
     prepare: impl FnOnce(&[&'static Currency]) -> Result<(Vec<Request>, Range), SmbsError>,
     fetch: impl Fn(&Client, &Request) -> Result<Fetched, SmbsError>,
     warning: impl Fn(&Fetched) -> Option<String>,
-    finish: impl FnOnce(Vec<Fetched>, Range) -> Output,
+    table: impl FnOnce(&[Fetched]) -> Table,
+    finish: impl FnOnce(Vec<Fetched>, Range, Option<Artifact>) -> Output,
 ) -> ExitCode {
-    let pretty = args.output.pretty;
+    let pretty = args.json.pretty;
     // Validate every input before touching the pacing state or the network.
     let prepared = parse_currencies(&args.currency)
         .and_then(|currencies| prepare(&currencies))
         .and_then(|(requests, range)| {
+            let target = args
+                .output
+                .as_deref()
+                .map(|path| OutputTarget::new(path, args.overwrite))
+                .transpose()?;
             let explicit = args
                 .request_interval_ms
                 .as_deref()
                 .map(|value| parse_interval_ms(value, "request-interval-ms"))
                 .transpose()?;
-            PacingConfig::from_env(explicit).map(|pacing| (requests, range, pacing))
+            PacingConfig::from_env(explicit).map(|pacing| (requests, range, target, pacing))
         });
-    let (requests, range, pacing) = match prepared {
+    let (requests, range, target, pacing) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => return fail(Some(operation), error, Metadata::new(None), pretty),
     };
@@ -361,9 +435,14 @@ fn run_fetch<Request, Range, Fetched, Output: Serialize>(
         }
     }
     let warnings = fetched.iter().filter_map(&warning).collect();
+    let artifact = match target.map(|target| target.write(&table(&fetched))) {
+        None => None,
+        Some(Ok(artifact)) => Some(artifact),
+        Some(Err(error)) => return fail(Some(operation), error, metadata, pretty),
+    };
     succeed(
         operation,
-        finish(fetched, range),
+        finish(fetched, range, artifact),
         metadata,
         warnings,
         pretty,
@@ -473,11 +552,12 @@ fn succeed<T: Serialize>(
 
 fn fail(
     operation: Option<&'static str>,
-    error: SmbsError,
+    error: impl Into<CliError>,
     metadata: Metadata,
     pretty: bool,
 ) -> ExitCode {
-    let status = if error.code == ErrorCode::InvalidRequest {
+    let error = error.into();
+    let status = if error.code == CliErrorCode::Sdk(ErrorCode::InvalidRequest) {
         2
     } else {
         1
