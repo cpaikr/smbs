@@ -26,13 +26,15 @@ crates/smbs-cli (binary `smbs`)  ->  crates/smbs (SDK)  ->  http://www.smbs.biz
    `from <= to`, `from >= 1990-01`, and the pacing interval.
 2. For each distinct currency in order, `Client::fetch`:
    1. acquires the pacing permit, waiting the interval under the lock;
-   2. sends `GET <path>?arr_value=<CUR>_<from>_<to>` with no redirects
-      (5 s connect, 30 s total, 1 MiB body cap);
-   3. requires `200` and `text/xml`, decodes EUC-KR strictly, and releases
-      the permit;
-   4. parses the chart and checks the caption for the basis, the
-      `YYYY.MM` labels, positive plain decimals, strictly ascending months,
-      and the requested range.
+   2. sends `GET <path>?arr_value=<CUR>_<from>_<end>` with no redirects
+      (5 s connect, 30 s total, 1 MiB body cap). `<end>` is `to` for monthly
+      averages and the month after `to` for month-end, whose endpoint
+      excludes its end month;
+   3. requires `200` and an XML media type (`text/xml` or `application/xml`),
+      decodes EUC-KR strictly, and releases the permit;
+   4. parses the chart: only `<set>` and `<styles>` children, the caption
+      for the basis, `YYYY.MM` labels, positive plain decimals, strictly
+      ascending months, and the requested range.
 3. The command stops at the first failure. Its envelope carries the error code
    and the public `sourceUrl`.
 
@@ -44,7 +46,9 @@ crates/smbs-cli (binary `smbs`)  ->  crates/smbs (SDK)  ->  http://www.smbs.biz
   `source_changed` or `source_parse_failure`, never partial data.
 - **Allowlisted currencies.** The source returns an empty chart for unknown
   codes, so only the dated list in
-  [`currency.rs`](crates/smbs/src/currency.rs) is accepted.
+  [`currency.rs`](crates/smbs/src/currency.rs) is accepted. `SeriesRequest::new`
+  re-resolves every currency against that list, so SDK callers cannot send
+  other codes or report a different name or unit.
 - **Cross-process pacing.** [`pacing.rs`](crates/smbs/src/pacing.rs) locks
   `request-pacing-v1.lock` in the state directory and holds the lock from
   before the wait until the response is read. The file records the last
@@ -53,7 +57,10 @@ crates/smbs-cli (binary `smbs`)  ->  crates/smbs (SDK)  ->  http://www.smbs.biz
   `internal_error`, and requests are never sent unpaced. Waiters are not
   served in order, so waiting more than 120 s for the lock gives up with a
   retryable `internal_error`. Pacing is local to one host. The model follows
-  the mytech request-pacing practice and darty. Library callers configure it
+  the mytech request-pacing practice and darty. With mixed intervals, each
+  request waits the larger of its own interval and the previous request's
+  interval. A longer interval held by a process still waiting for the lock
+  does not slow other processes until it gets the lock. Library callers configure it
   with `PacingConfig::new`; `PacingConfig::from_env` adds the environment
   variables.
 - **Errors say whether a retry can help.** A transport failure, timeout, 408,

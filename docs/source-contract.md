@@ -29,6 +29,11 @@ mytech's provider-qualification practice. Observations were made on
   then one `<set label='YYYY.MM' value='1490.11' />` per month in ascending
   order, followed by `<styles>`.
 - One request covers any range. JPY from 1996-01 to 2026-11 returned 370 rows.
+- The start month is inclusive for both bases. The end month is inclusive
+  for 월평균 but **exclusive for 월말**: `USD_2025-01_2025-03` returns
+  2025.01-2025.02, and `USD_2025-03_2025-03` returns nothing. The client
+  sends the following end month for 월말, so `to` is inclusive for both
+  bases (**project decision**).
 - Both bases start at 1990-03. Earlier months in the range are omitted.
 - The current, incomplete month is omitted.
 - Values are KRW per unit. The dropdown marks JPY, IDR, and VND as `(100)`.
