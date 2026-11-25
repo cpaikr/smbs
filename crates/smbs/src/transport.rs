@@ -53,20 +53,21 @@ impl Transport {
             .map_err(|error| {
                 unavailable(match error {
                     ureq::Error::Timeout(_) => "The smbs.biz request timed out.".to_owned(),
-                    _ => "The smbs.biz request failed.".to_owned(),
+                    // The URL is public and carries no credentials, so the cause is safe to show.
+                    other => truncate(&format!("The smbs.biz request failed: {other}."), 300),
                 })
             })?;
 
         let status = response.status().as_u16();
         if status != 200 {
-            let mut error = unavailable(format!("smbs.biz returned HTTP status {status}."));
-            error.recovery_hint = Some(retry_hint(
+            return Err(status_error(
+                status,
                 response
                     .headers()
                     .get(RETRY_AFTER)
                     .and_then(|value| value.to_str().ok()),
+                &public_url,
             ));
-            return Err(error);
         }
 
         let content_type = response
@@ -109,6 +110,27 @@ impl Transport {
     }
 }
 
+/// Classifies a non-200 status.
+///
+/// - 429, and 503 with `Retry-After`: `rate_limited`, retryable after a wait.
+/// - 408 and other 5xx: `source_unavailable`, retryable.
+/// - Redirects (e.g. to a login or error page) and other 4xx: `source_changed`;
+///   retrying the same request will not help.
+fn status_error(status: u16, retry_after: Option<&str>, public_url: &str) -> SmbsError {
+    let message = format!("smbs.biz returned HTTP status {status}.");
+    let code = match status {
+        429 => ErrorCode::RateLimited,
+        503 if retry_after.is_some() => ErrorCode::RateLimited,
+        408 | 500..=599 => ErrorCode::SourceUnavailable,
+        _ => ErrorCode::SourceChanged,
+    };
+    let mut error = SmbsError::source(code, message, public_url);
+    if code == ErrorCode::RateLimited {
+        error.recovery_hint = Some(retry_hint(retry_after));
+    }
+    error
+}
+
 /// Never suggests an immediate retry; honors a bounded `Retry-After` in seconds.
 fn retry_hint(retry_after: Option<&str>) -> String {
     match retry_after
@@ -122,9 +144,17 @@ fn retry_hint(retry_after: Option<&str>) -> String {
     }
 }
 
+fn truncate(text: &str, max_chars: usize) -> String {
+    match text.char_indices().nth(max_chars) {
+        Some((end, _)) => format!("{}...", &text[..end]),
+        None => text.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::retry_hint;
+    use super::*;
+    use ErrorCode::{RateLimited, SourceChanged, SourceUnavailable};
 
     #[test]
     fn retry_hint_uses_only_bounded_seconds() {
@@ -137,5 +167,32 @@ mod tests {
         ] {
             assert!(retry_hint(ignored).starts_with("Wait before retrying"));
         }
+    }
+
+    #[test]
+    fn statuses_are_classified_by_what_a_retry_can_fix() {
+        let classify = |status, retry_after| {
+            let error = status_error(status, retry_after, "http://www.smbs.biz/x");
+            (error.code, error.retryable, error.recovery_hint.is_some())
+        };
+
+        assert_eq!(classify(429, None), (RateLimited, true, true));
+        assert_eq!(classify(503, Some("30")), (RateLimited, true, true));
+        assert_eq!(classify(503, None), (SourceUnavailable, true, false));
+        assert_eq!(classify(500, None), (SourceUnavailable, true, false));
+        assert_eq!(classify(408, None), (SourceUnavailable, true, false));
+        for status in [301, 302, 400, 403, 404, 410] {
+            assert_eq!(
+                classify(status, None),
+                (SourceChanged, false, false),
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
+    fn truncate_respects_char_boundaries() {
+        assert_eq!(truncate("가나다", 2), "가나...");
+        assert_eq!(truncate("abc", 3), "abc");
     }
 }

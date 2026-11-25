@@ -309,15 +309,34 @@ fn invalid_invocations_exit_2_without_requests() {
             Some("request-interval-ms"),
         ),
         (
+            &[
+                "month-end",
+                "--currency",
+                "USD",
+                "--from",
+                "2025-01",
+                "--request-interval-ms",
+                "-5",
+            ],
+            None,
+            Some("request-interval-ms"),
+        ),
+        (
+            &["month-end", "--currency", "-USD", "--from", "2025-01"],
+            None,
+            Some("currency"),
+        ),
+        (
+            &["month-end", "--currency", "USD,", "--from", "2025-01"],
+            None,
+            Some("currency"),
+        ),
+        (
             &["month-end", "--currency", "USD", "--from", "2025-01"],
             Some("70000"),
             Some("SMBS_REQUEST_INTERVAL_MS"),
         ),
-        (
-            &["month-end", "--currency", "USD"],
-            None,
-            Some("--from <YYYY-MM>"),
-        ),
+        (&["month-end", "--currency", "USD"], None, Some("from")),
         (&["no-such-command"], None, None),
     ];
     for (args, interval, parameter) in cases {
@@ -367,7 +386,7 @@ fn source_failures_are_classified_and_exit_1() {
                 "Retry-After: 120\r\n",
                 b"",
             ),
-            "source_unavailable",
+            "rate_limited",
             true,
         ),
         (
@@ -377,6 +396,11 @@ fn source_failures_are_classified_and_exit_1() {
                 "Location: /Member/Login.jsp\r\n",
                 b"",
             ),
+            "source_changed",
+            false,
+        ),
+        (
+            response("500 Internal Server Error", "text/html", "", b""),
             "source_unavailable",
             true,
         ),

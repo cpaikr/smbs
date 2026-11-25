@@ -9,6 +9,8 @@ pub enum ErrorCode {
     InvalidRequest,
     /// The source could not be reached, timed out, or returned a non-200 status.
     SourceUnavailable,
+    /// The source signaled rate limiting (429, or 503 with `Retry-After`).
+    RateLimited,
     /// The source answered with a shape this client does not support.
     SourceChanged,
     /// The response could not be decoded or parsed.
@@ -51,12 +53,15 @@ impl SmbsError {
     pub(crate) fn source(code: ErrorCode, message: impl Into<String>, source_url: &str) -> Self {
         debug_assert!(matches!(
             code,
-            ErrorCode::SourceUnavailable | ErrorCode::SourceChanged | ErrorCode::SourceParseFailure
+            ErrorCode::SourceUnavailable
+                | ErrorCode::RateLimited
+                | ErrorCode::SourceChanged
+                | ErrorCode::SourceParseFailure
         ));
         Self {
             code,
             message: message.into(),
-            retryable: code == ErrorCode::SourceUnavailable,
+            retryable: matches!(code, ErrorCode::SourceUnavailable | ErrorCode::RateLimited),
             parameter: None,
             source_url: Some(source_url.to_owned()),
             recovery_hint: None,

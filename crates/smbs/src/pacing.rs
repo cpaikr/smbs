@@ -7,10 +7,11 @@
 //! process death, or wall-clock changes cannot release a queued burst.
 
 use std::{
+    ffi::OsString,
     fs::{File, OpenOptions, TryLockError},
     io::{Read, Seek, SeekFrom, Write},
-    path::{Path, PathBuf},
-    time::Duration,
+    path::PathBuf,
+    time::{Duration, Instant},
 };
 
 use serde::Serialize;
@@ -24,6 +25,10 @@ pub const INTERVAL_ENV: &str = "SMBS_REQUEST_INTERVAL_MS";
 pub const STATE_DIR_ENV: &str = "SMBS_STATE_DIR";
 const LOCK_FILE: &str = "request-pacing-v1.lock";
 const LOCK_POLL: Duration = Duration::from_millis(25);
+/// Covers several queued processes, each holding the lock for an interval plus
+/// up to the 30 s request deadline. Waiters are not served in order, so the
+/// wait is bounded instead of hanging silently.
+const LOCK_WAIT_LIMIT: Duration = Duration::from_secs(120);
 
 /// Where the effective request interval came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -43,33 +48,42 @@ pub struct PacingConfig {
     lock_path: Option<PathBuf>,
 }
 
+type Env<'a> = &'a dyn Fn(&str) -> Option<OsString>;
+
 impl PacingConfig {
+    /// Typed settings for library callers. `state_dir` must be absolute;
+    /// `None` uses the per-user state directory. A zero interval disables
+    /// pacing and needs no state directory.
+    ///
+    /// # Errors
+    /// `invalid_request` for an interval above [`MAX_INTERVAL_MS`] or a
+    /// relative directory; `internal_error` when no state directory exists.
+    pub fn new(interval: Duration, state_dir: Option<PathBuf>) -> Result<Self, SmbsError> {
+        Self::build(interval, IntervalSource::Option, state_dir, &|name| {
+            std::env::var_os(name)
+        })
+    }
+
     /// Resolves the interval from `explicit`, then `SMBS_REQUEST_INTERVAL_MS`,
-    /// then the default, and the lock location from `SMBS_STATE_DIR` or the
+    /// then the default, and the lock directory from `SMBS_STATE_DIR` or the
     /// per-user state directory.
     ///
     /// # Errors
-    /// `invalid_request` for an out-of-range or malformed interval or a relative
-    /// state directory; `internal_error` when no state directory can be found.
-    pub fn resolve(explicit_ms: Option<&str>) -> Result<Self, SmbsError> {
-        Self::resolve_with(explicit_ms, |name| std::env::var_os(name))
+    /// As [`PacingConfig::new`], plus `invalid_request` for a malformed
+    /// `SMBS_REQUEST_INTERVAL_MS`.
+    pub fn from_env(explicit: Option<Duration>) -> Result<Self, SmbsError> {
+        Self::from_env_with(explicit, &|name| std::env::var_os(name))
     }
 
-    fn resolve_with(
-        explicit_ms: Option<&str>,
-        env: impl Fn(&str) -> Option<std::ffi::OsString>,
-    ) -> Result<Self, SmbsError> {
-        let (interval, source) = if let Some(value) = explicit_ms {
-            (
-                parse_interval(value, "request-interval-ms")?,
-                IntervalSource::Option,
-            )
+    fn from_env_with(explicit: Option<Duration>, env: Env<'_>) -> Result<Self, SmbsError> {
+        let (interval, source) = if let Some(interval) = explicit {
+            (interval, IntervalSource::Option)
         } else if let Some(value) = env(INTERVAL_ENV) {
             let value = value
                 .to_str()
                 .ok_or_else(|| invalid_interval(INTERVAL_ENV))?;
             (
-                parse_interval(value, INTERVAL_ENV)?,
+                parse_interval_ms(value, INTERVAL_ENV)?,
                 IntervalSource::Environment,
             )
         } else {
@@ -78,22 +92,32 @@ impl PacingConfig {
                 IntervalSource::Default,
             )
         };
+        let state_dir = env(STATE_DIR_ENV).map(PathBuf::from);
+        Self::build(interval, source, state_dir, env)
+    }
+
+    fn build(
+        interval: Duration,
+        source: IntervalSource,
+        state_dir: Option<PathBuf>,
+        env: Env<'_>,
+    ) -> Result<Self, SmbsError> {
+        if interval > Duration::from_millis(MAX_INTERVAL_MS) {
+            return Err(invalid_interval("requestInterval"));
+        }
         let lock_path = if interval.is_zero() {
             None
         } else {
-            let directory = match env(STATE_DIR_ENV) {
-                Some(directory) => {
-                    let directory = PathBuf::from(directory);
-                    if !directory.is_absolute() {
-                        return Err(SmbsError::invalid(
-                            format!("{STATE_DIR_ENV} must be an absolute directory path."),
-                            STATE_DIR_ENV,
-                            "Unset it to use the per-user state directory.",
-                        ));
-                    }
-                    directory
+            let directory = match state_dir {
+                Some(directory) if directory.is_absolute() => directory,
+                Some(_) => {
+                    return Err(SmbsError::invalid(
+                        format!("{STATE_DIR_ENV} must be an absolute directory path."),
+                        STATE_DIR_ENV,
+                        "Unset it to use the per-user state directory.",
+                    ));
                 }
-                None => default_state_directory(&env).ok_or_else(|| {
+                None => default_state_directory(env).ok_or_else(|| {
                     state_error(format!(
                         "No per-user state directory is available; set {STATE_DIR_ENV}."
                     ))
@@ -122,20 +146,46 @@ impl PacingConfig {
         let Some(path) = &self.lock_path else {
             return Ok(Permit(None));
         };
+        let failed =
+            |error: std::io::Error| state_error(format!("Request pacing state failed: {error}"));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(failed)?;
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(failed)?;
+        let deadline = Instant::now() + LOCK_WAIT_LIMIT;
         loop {
-            match try_acquire(path, self.interval)
-                .map_err(|error| state_error(format!("Request pacing state failed: {error}")))?
-            {
-                Attempt::Wait => std::thread::sleep(LOCK_POLL),
-                Attempt::Ready(mut file, delay) => {
-                    std::thread::sleep(delay);
-                    write_interval(&mut file, self.interval).map_err(|error| {
-                        state_error(format!("Request pacing state failed: {error}"))
-                    })?;
-                    return Ok(Permit(Some(file)));
+            match file.try_lock() {
+                Ok(()) => break,
+                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    std::thread::sleep(LOCK_POLL);
                 }
+                Err(TryLockError::WouldBlock) => {
+                    let mut error = SmbsError::internal(
+                        format!(
+                            "Waited {} s for other smbs processes to finish their requests.",
+                            LOCK_WAIT_LIMIT.as_secs()
+                        ),
+                        "Run fewer smbs processes at once, then retry.",
+                    );
+                    error.retryable = true;
+                    return Err(error);
+                }
+                Err(TryLockError::Error(error)) => return Err(failed(error)),
             }
         }
+        let delay = recorded_delay(&mut file, self.interval).map_err(failed)?;
+        // Persist the longer cooldown in case this process dies while waiting.
+        write_interval(&mut file, delay).map_err(failed)?;
+        std::thread::sleep(delay);
+        write_interval(&mut file, self.interval).map_err(failed)?;
+        // Never unlink or replace this file: every process must lock the same inode.
+        Ok(Permit(Some(file)))
     }
 }
 
@@ -143,46 +193,24 @@ impl PacingConfig {
 #[derive(Debug)]
 pub(crate) struct Permit(#[allow(dead_code)] Option<File>);
 
-enum Attempt {
-    Ready(File, Duration),
-    Wait,
-}
-
-fn try_acquire(path: &Path, interval: Duration) -> std::io::Result<Attempt> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(path)?;
-    match file.try_lock() {
-        Ok(()) => {}
-        Err(TryLockError::WouldBlock) => return Ok(Attempt::Wait),
-        Err(TryLockError::Error(error)) => return Err(error),
-    }
-
-    let mut delay = interval;
+/// The wait before this request: the longer of our interval and the one the
+/// previous holder recorded, so processes with different values honor the largest.
+fn recorded_delay(file: &mut File, interval: Duration) -> std::io::Result<Duration> {
     let length = file.metadata()?.len();
-    if length != 0 {
-        if length != 8 {
-            return Err(std::io::Error::other("invalid pacing record length"));
-        }
-        let mut record = [0; 8];
-        file.read_exact(&mut record)?;
-        let previous = u64::from_le_bytes(record);
-        if previous > MAX_INTERVAL_MS {
-            return Err(std::io::Error::other("invalid pacing interval record"));
-        }
-        // Honor the longest interval among processes that use different values.
-        delay = interval.max(Duration::from_millis(previous));
+    if length == 0 {
+        return Ok(interval);
     }
-    // Persist the longer cooldown in case this process dies while waiting.
-    write_interval(&mut file, delay)?;
-    // Never unlink or replace this file: every process must lock the same inode.
-    Ok(Attempt::Ready(file, delay))
+    if length != 8 {
+        return Err(std::io::Error::other("invalid pacing record length"));
+    }
+    let mut record = [0; 8];
+    file.seek(SeekFrom::Start(0))?;
+    file.read_exact(&mut record)?;
+    let previous = u64::from_le_bytes(record);
+    if previous > MAX_INTERVAL_MS {
+        return Err(std::io::Error::other("invalid pacing interval record"));
+    }
+    Ok(interval.max(Duration::from_millis(previous)))
 }
 
 fn write_interval(file: &mut File, interval: Duration) -> std::io::Result<()> {
@@ -192,7 +220,12 @@ fn write_interval(file: &mut File, interval: Duration) -> std::io::Result<()> {
     file.flush()
 }
 
-fn parse_interval(value: &str, parameter: &str) -> Result<Duration, SmbsError> {
+/// Parses a millisecond interval from text (a flag or environment value),
+/// naming `parameter` in errors.
+///
+/// # Errors
+/// `invalid_request` unless `value` is an integer from 0 through [`MAX_INTERVAL_MS`].
+pub fn parse_interval_ms(value: &str, parameter: &str) -> Result<Duration, SmbsError> {
     if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(invalid_interval(parameter));
     }
@@ -214,7 +247,7 @@ fn invalid_interval(parameter: &str) -> SmbsError {
     )
 }
 
-fn default_state_directory(env: &impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf> {
+fn default_state_directory(env: Env<'_>) -> Option<PathBuf> {
     let non_empty = |name: &str| env(name).filter(|value| !value.is_empty());
     if cfg!(windows) {
         non_empty("LOCALAPPDATA").map(|root| PathBuf::from(root).join("smbs"))
@@ -236,7 +269,7 @@ fn state_error(message: String) -> SmbsError {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, ffi::OsString, time::Instant};
+    use std::collections::HashMap;
 
     use super::*;
     use crate::ErrorCode;
@@ -256,6 +289,14 @@ mod tests {
         directory
     }
 
+    fn config(interval_ms: u64, path: PathBuf) -> PacingConfig {
+        PacingConfig {
+            interval: Duration::from_millis(interval_ms),
+            source: IntervalSource::Option,
+            lock_path: Some(path),
+        }
+    }
+
     #[test]
     fn interval_is_bounded_and_strict() {
         for value in [
@@ -268,33 +309,34 @@ mod tests {
             "18446744073709551616",
         ] {
             assert_eq!(
-                parse_interval(value, "x").unwrap_err().code,
+                parse_interval_ms(value, "x").unwrap_err().code,
                 ErrorCode::InvalidRequest,
                 "{value}"
             );
         }
-        assert_eq!(parse_interval("0", "x").unwrap(), Duration::ZERO);
+        assert_eq!(parse_interval_ms("0", "x").unwrap(), Duration::ZERO);
         assert_eq!(
-            parse_interval("60000", "x").unwrap(),
+            parse_interval_ms("60000", "x").unwrap(),
             Duration::from_secs(60)
         );
+        assert!(PacingConfig::new(Duration::from_millis(60_001), None).is_err());
     }
 
     #[test]
     fn precedence_is_option_then_environment_then_default() {
         let state = if cfg!(windows) { "C:\\state" } else { "/state" };
         let both = env(&[(INTERVAL_ENV, "2000"), (STATE_DIR_ENV, state)]);
-        let option = PacingConfig::resolve_with(Some("3000"), &both).unwrap();
+        let option = PacingConfig::from_env_with(Some(Duration::from_secs(3)), &both).unwrap();
         assert_eq!(
             (option.interval(), option.source()),
             (Duration::from_secs(3), IntervalSource::Option)
         );
-        let environment = PacingConfig::resolve_with(None, &both).unwrap();
+        let environment = PacingConfig::from_env_with(None, &both).unwrap();
         assert_eq!(
             (environment.interval(), environment.source()),
             (Duration::from_secs(2), IntervalSource::Environment)
         );
-        let default = PacingConfig::resolve_with(None, env(&[(STATE_DIR_ENV, state)])).unwrap();
+        let default = PacingConfig::from_env_with(None, &env(&[(STATE_DIR_ENV, state)])).unwrap();
         assert_eq!(
             (default.interval(), default.source()),
             (Duration::from_secs(1), IntervalSource::Default)
@@ -303,10 +345,9 @@ mod tests {
             default.lock_path,
             Some(PathBuf::from(state).join(LOCK_FILE))
         );
-        // A bad environment value is an error even when it would be overridden later.
         let bad = env(&[(INTERVAL_ENV, "fast")]);
         assert_eq!(
-            PacingConfig::resolve_with(None, &bad)
+            PacingConfig::from_env_with(None, &bad)
                 .unwrap_err()
                 .parameter
                 .as_deref(),
@@ -316,22 +357,18 @@ mod tests {
 
     #[test]
     fn zero_disables_pacing_and_needs_no_state_directory() {
-        let config = PacingConfig::resolve_with(Some("0"), env(&[])).unwrap();
+        let config = PacingConfig::from_env_with(Some(Duration::ZERO), &env(&[])).unwrap();
         assert!(config.lock_path.is_none());
-        let relative = PacingConfig::resolve_with(None, env(&[(STATE_DIR_ENV, "relative")]));
+        let relative = PacingConfig::from_env_with(None, &env(&[(STATE_DIR_ENV, "relative")]));
         assert_eq!(relative.unwrap_err().code, ErrorCode::InvalidRequest);
-        let missing = PacingConfig::resolve_with(None, env(&[]));
+        let missing = PacingConfig::from_env_with(None, &env(&[]));
         assert_eq!(missing.unwrap_err().code, ErrorCode::InternalError);
     }
 
     #[test]
     fn a_long_held_permit_does_not_shorten_the_next_cooldown() {
         let directory = temp_state_dir("held");
-        let config = PacingConfig {
-            interval: Duration::from_millis(100),
-            source: IntervalSource::Option,
-            lock_path: Some(directory.join(LOCK_FILE)),
-        };
+        let config = config(100, directory.join(LOCK_FILE));
         let permit = config.acquire().unwrap();
         std::thread::sleep(Duration::from_millis(200));
         drop(permit);
@@ -342,18 +379,33 @@ mod tests {
     }
 
     #[test]
+    fn a_second_holder_waits_for_release_and_then_the_interval() {
+        let directory = temp_state_dir("contended");
+        let config = config(100, directory.join(LOCK_FILE));
+        let permit = config.acquire().unwrap();
+        let waiter = {
+            let config = config.clone();
+            std::thread::spawn(move || {
+                let permit = config.acquire().unwrap();
+                (Instant::now(), permit)
+            })
+        };
+        std::thread::sleep(Duration::from_millis(150));
+        let released = Instant::now();
+        drop(permit);
+        let (acquired, _permit) = waiter.join().unwrap();
+        assert!(acquired - released >= Duration::from_millis(100));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn a_waiting_process_honors_the_longer_recorded_interval() {
         let directory = temp_state_dir("longer");
         let path = directory.join(LOCK_FILE);
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(&path, 300_u64.to_le_bytes()).unwrap();
-        let config = PacingConfig {
-            interval: Duration::from_millis(50),
-            source: IntervalSource::Option,
-            lock_path: Some(path),
-        };
         let started = Instant::now();
-        drop(config.acquire().unwrap());
+        drop(config(50, path).acquire().unwrap());
         assert!(started.elapsed() >= Duration::from_millis(300));
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -364,12 +416,10 @@ mod tests {
         let path = directory.join(LOCK_FILE);
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(&path, b"bad").unwrap();
-        let config = PacingConfig {
-            interval: Duration::from_millis(10),
-            source: IntervalSource::Option,
-            lock_path: Some(path),
-        };
-        assert_eq!(config.acquire().unwrap_err().code, ErrorCode::InternalError);
+        assert_eq!(
+            config(10, path).acquire().unwrap_err().code,
+            ErrorCode::InternalError
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

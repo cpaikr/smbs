@@ -14,14 +14,14 @@ use clap::{
 use serde::Serialize;
 use smbs::{
     Basis, CURRENCIES, Client, Currency, ErrorCode, IntervalSource, PacingConfig, Series,
-    SeriesRequest, SmbsError, YearMonth,
+    SeriesRequest, SmbsError, YearMonth, parse_interval_ms,
 };
 
 const CONTRACT_VERSION: &str = "1";
 
 const ROOT_AFTER: &str = "\
 Output:
-  Each command prints one JSON line: {\"ok\":true,\"operation\",\"result\",\"metadata\",\"warnings\"}
+  Each command prints one JSON document (one line unless --pretty): {\"ok\":true,\"operation\",\"result\",\"metadata\",\"warnings\"}
   or {\"ok\":false,\"operation\",\"error\":{\"code\",\"message\",\"retryable\",...}}.
   Exit status: 0 success, 1 execution failure, 2 invalid invocation.
 
@@ -72,16 +72,22 @@ enum Command {
 #[derive(Debug, Args)]
 struct SeriesArgs {
     /// Currency codes, comma-separated or repeated (e.g. USD,JPY). See `smbs currencies`.
-    #[arg(long, value_name = "codes", value_delimiter = ',', required = true)]
+    #[arg(
+        long,
+        value_name = "codes",
+        value_delimiter = ',',
+        required = true,
+        allow_hyphen_values = true
+    )]
     currency: Vec<String>,
     /// First month, YYYY-MM (1990-01 or later).
-    #[arg(long, value_name = "YYYY-MM")]
+    #[arg(long, value_name = "YYYY-MM", allow_hyphen_values = true)]
     from: String,
     /// Last month, YYYY-MM. Defaults to the current month in Korea.
-    #[arg(long, value_name = "YYYY-MM")]
+    #[arg(long, value_name = "YYYY-MM", allow_hyphen_values = true)]
     to: Option<String>,
     /// Milliseconds to wait before each request (0-60000; default 1000).
-    #[arg(long, value_name = "ms")]
+    #[arg(long, value_name = "ms", allow_hyphen_values = true)]
     request_interval_ms: Option<String>,
     #[command(flatten)]
     output: OutputArgs,
@@ -205,7 +211,12 @@ fn run_series(operation: &'static str, basis: Basis, args: &SeriesArgs) -> ExitC
     let pretty = args.output.pretty;
     // Validate every input before touching the pacing state or the network.
     let prepared = prepare(basis, args).and_then(|requests| {
-        PacingConfig::resolve(args.request_interval_ms.as_deref()).map(|pacing| (requests, pacing))
+        let explicit = args
+            .request_interval_ms
+            .as_deref()
+            .map(|value| parse_interval_ms(value, "request-interval-ms"))
+            .transpose()?;
+        PacingConfig::from_env(explicit).map(|pacing| (requests, pacing))
     });
     let (requests, pacing) = match prepared {
         Ok(prepared) => prepared,
@@ -248,7 +259,7 @@ fn prepare(basis: Basis, args: &SeriesArgs) -> Result<Vec<SeriesRequest>, SmbsEr
     let from = YearMonth::parse(&args.from, "from")?;
     let to = match &args.to {
         Some(to) => YearMonth::parse(to, "to")?,
-        None => clock::current_korea_month(),
+        None => clock::current_korea_month()?,
     };
     let mut currencies: Vec<&'static Currency> = Vec::new();
     for code in &args.currency {
@@ -264,7 +275,10 @@ fn prepare(basis: Basis, args: &SeriesArgs) -> Result<Vec<SeriesRequest>, SmbsEr
 }
 
 #[cfg(not(feature = "fixture-origin"))]
-#[allow(clippy::unnecessary_wraps, reason = "same signature as the fixture build")]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "same signature as the fixture build"
+)]
 fn build_client(pacing: PacingConfig) -> Result<Client, SmbsError> {
     Ok(Client::new(pacing))
 }
@@ -295,9 +309,16 @@ fn invocation_error(error: &clap::Error) -> SmbsError {
         .unwrap_or_default()
         .trim_start_matches("error: ")
         .to_owned();
+    // Report the bare argument name (`from`), the same vocabulary as domain errors.
     let parameter = match error.get(ContextKind::InvalidArg) {
-        Some(ContextValue::String(argument)) => Some(argument.clone()),
-        Some(ContextValue::Strings(arguments)) => Some(arguments.join(", ")),
+        Some(ContextValue::String(argument)) => Some(bare_argument(argument)),
+        Some(ContextValue::Strings(arguments)) => Some(
+            arguments
+                .iter()
+                .map(|argument| bare_argument(argument))
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
         _ => None,
     };
     SmbsError {
@@ -308,6 +329,16 @@ fn invocation_error(error: &clap::Error) -> SmbsError {
         source_url: None,
         recovery_hint: Some("Run `smbs --help` or `smbs <command> --help`.".to_owned()),
     }
+}
+
+/// `--from <YYYY-MM>` -> `from`; positional or unknown values pass through.
+fn bare_argument(argument: &str) -> String {
+    argument
+        .split_whitespace()
+        .next()
+        .unwrap_or(argument)
+        .trim_start_matches("--")
+        .to_owned()
 }
 
 fn succeed<T: Serialize>(
@@ -361,4 +392,37 @@ fn write_json(value: &impl Serialize, pretty: bool) {
     rendered.push('\n');
     // A closed stdout cannot be reported anywhere else; the exit status still is.
     let _ = std::io::stdout().lock().write_all(rendered.as_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+    use smbs::{DEFAULT_INTERVAL_MS, MAX_INTERVAL_MS};
+
+    use super::*;
+
+    /// Help text is hand-written; keep its numbers tied to the SDK constants.
+    #[test]
+    fn help_matches_pacing_constants() {
+        let root = Cli::command().render_long_help().to_string();
+        let series = Cli::command()
+            .find_subcommand_mut("month-end")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        for text in [&root, &series] {
+            assert!(
+                text.contains(&format!("{DEFAULT_INTERVAL_MS} ms"))
+                    || text.contains(&format!("default {DEFAULT_INTERVAL_MS}"))
+            );
+            assert!(text.contains(&format!("0-{MAX_INTERVAL_MS}")));
+        }
+    }
+
+    #[test]
+    fn bare_argument_strips_flag_syntax() {
+        assert_eq!(bare_argument("--from <YYYY-MM>"), "from");
+        assert_eq!(bare_argument("--pretty"), "pretty");
+        assert_eq!(bare_argument("-5"), "-5");
+    }
 }
