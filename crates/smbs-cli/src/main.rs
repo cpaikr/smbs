@@ -258,6 +258,8 @@ struct DailyResult {
 struct VersionResult {
     name: &'static str,
     version: &'static str,
+    /// Rust target triple the binary was built for.
+    target: &'static str,
 }
 
 fn main() -> ExitCode {
@@ -309,6 +311,7 @@ fn main() -> ExitCode {
             VersionResult {
                 name: "smbs",
                 version: env!("CARGO_PKG_VERSION"),
+                target: env!("SMBS_BUILD_TARGET"),
             },
             Metadata::new(None),
             vec![],

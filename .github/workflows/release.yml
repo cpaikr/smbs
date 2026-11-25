@@ -1,0 +1,218 @@
+name: Release
+
+# A manual run with `tag` publishes that version. Without a tag, and on pull
+# requests that touch release files, it is a build-only candidate: every
+# target is built, packaged, installed, and checked, and nothing is published.
+# See docs/release.md.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to publish (vX.Y.Z). Leave empty for a build-only candidate.
+        required: false
+        default: ""
+  pull_request:
+    paths:
+      - release-targets.json
+      - scripts/install/**
+      - scripts/release/**
+      - .github/workflows/release.yml
+      - Cargo.toml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      ref: ${{ steps.meta.outputs.ref }}
+      publish: ${{ steps.meta.outputs.publish }}
+      matrix: ${{ steps.meta.outputs.matrix }}
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ inputs.tag || github.sha }}
+      - name: Resolve version and release gates
+        id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[] | select(.name == "smbs-cli") | .version')"
+          sha="$(git rev-parse HEAD)"
+          publish=false
+          if [ -n "$TAG" ]; then
+            [ "$ACTOR" = "sjunepark" ] || { echo "only the maintainer publishes releases" >&2; exit 1; }
+            [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag must be vX.Y.Z" >&2; exit 1; }
+            [ "$TAG" = "v${version}" ] || { echo "tag $TAG does not match Cargo version $version" >&2; exit 1; }
+            git merge-base --is-ancestor "$sha" origin/main || { echo "$TAG is not on main" >&2; exit 1; }
+            ci="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$sha" --event push --json conclusion --jq '[.[] | select(.conclusion == "success")] | length')"
+            [ "$ci" -gt 0 ] || { echo "no successful CI run on main for $sha" >&2; exit 1; }
+            if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "release $TAG already exists; fixes ship as a new version" >&2
+              exit 1
+            fi
+            publish=true
+          fi
+          {
+            echo "version=${version}"
+            echo "ref=${sha}"
+            echo "publish=${publish}"
+            echo "matrix=$(jq -c '{include: .targets}' release-targets.json)"
+          } >> "$GITHUB_OUTPUT"
+          echo "version ${version}, commit ${sha}, publish ${publish}"
+
+  build:
+    needs: prepare
+    name: build (${{ matrix.key }})
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      ASSET: smbs-${{ needs.prepare.outputs.version }}-${{ matrix.key }}.${{ matrix.archive }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.ref }}
+      - name: Build
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --target "${{ matrix.rustTarget }}"
+          rustup default stable
+          cargo build --release --locked -p smbs-cli --target "${{ matrix.rustTarget }}"
+          mkdir stage
+          cp "target/${{ matrix.rustTarget }}/release/${{ matrix.executable }}" LICENSE.md stage/
+      - name: Report glibc requirement
+        if: runner.os == 'Linux'
+        run: objdump -T stage/smbs | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
+      - name: Package (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        run: tar -czf "$ASSET" -C stage "${{ matrix.executable }}" LICENSE.md
+      - name: Package (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: Compress-Archive -Path stage/* -DestinationPath $env:ASSET
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: archive-${{ matrix.key }}
+          path: ${{ env.ASSET }}
+          if-no-files-found: error
+
+  assemble:
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.ref }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: archive-*
+          merge-multiple: true
+          path: archives
+      - run: bash scripts/release/assemble.sh "${{ needs.prepare.outputs.version }}" archives dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: release-assets
+          path: dist/
+          if-no-files-found: error
+
+  verify:
+    needs: [prepare, assemble]
+    name: verify (${{ matrix.key }})
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: release-assets
+          path: dist
+      - name: Install with install.sh and run the binary
+        if: runner.os != 'Windows'
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -eu
+          cd dist
+          if command -v sha256sum >/dev/null; then sha256sum -c SHA256SUMS; else shasum -a 256 -c SHA256SUMS; fi
+          SMBS_ARCHIVE_DIR="$PWD" SMBS_INSTALL_DIR="$RUNNER_TEMP/bin" sh ./install.sh
+          bin="$RUNNER_TEMP/bin/smbs"
+          "$bin" --version | grep -Fx "smbs ${VERSION}"
+          "$bin" --help | grep -q daily
+          "$bin" currencies | jq -e '.ok and (.result | length) == 58'
+          "$bin" version | jq -e --arg target "${{ matrix.rustTarget }}" '.result.target == $target'
+      - name: Install with install.ps1 and run the binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:SMBS_ARCHIVE_DIR = (Resolve-Path dist).Path
+          $env:SMBS_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'bin'
+          Get-Content dist/install.ps1 -Raw | Invoke-Expression
+          $bin = Join-Path $env:SMBS_INSTALL_DIR 'smbs.exe'
+          if ((& $bin --version) -ne "smbs $env:VERSION") { throw 'unexpected --version output' }
+          $currencies = & $bin currencies | ConvertFrom-Json
+          if (-not $currencies.ok -or $currencies.result.Count -ne 58) { throw 'currencies failed' }
+          $version = & $bin version | ConvertFrom-Json
+          if ($version.result.target -ne '${{ matrix.rustTarget }}') { throw 'unexpected build target' }
+
+  publish:
+    needs: [prepare, verify]
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: release-assets
+          path: dist
+      - name: Publish
+        run: |
+          set -euo pipefail
+          cat > notes.md <<EOF
+          Install or upgrade (Linux x64/arm64, macOS Apple silicon):
+
+              curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/install.sh | sh
+
+          Windows x64 (PowerShell):
+
+              irm https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/install.ps1 | iex
+
+          Verify downloads with SHA256SUMS. See the README for what changed and how to use it.
+          EOF
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "smbs ${TAG}" --notes-file notes.md
+          # Compare what GitHub stored with what was verified, then publish.
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir uploaded
+          (cd dist && sha256sum -- * | sort -k 2) > expected.txt
+          (cd uploaded && sha256sum -- * | sort -k 2) > actual.txt
+          diff expected.txt actual.txt
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest

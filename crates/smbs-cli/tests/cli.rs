@@ -515,6 +515,7 @@ fn offline_commands_need_no_source() {
     let (output, value) = run(&mut smbs(None, &state_dir("offline"), None, &["version"]));
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(value["result"]["version"], env!("CARGO_PKG_VERSION"));
+    assert!(value["result"]["target"].as_str().unwrap().contains('-'));
     assert_eq!(
         value["metadata"],
         serde_json::json!({"contractVersion": "1"})

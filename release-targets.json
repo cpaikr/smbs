@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "repository": "cpaikr/smbs",
+  "binaryName": "smbs",
+  "checksumFile": "SHA256SUMS",
+  "installers": ["install.sh", "install.ps1"],
+  "targets": [
+    {
+      "key": "linux-x64-gnu",
+      "rustTarget": "x86_64-unknown-linux-gnu",
+      "runner": "ubuntu-22.04",
+      "archive": "tar.gz",
+      "executable": "smbs"
+    },
+    {
+      "key": "linux-arm64-gnu",
+      "rustTarget": "aarch64-unknown-linux-gnu",
+      "runner": "ubuntu-22.04-arm",
+      "archive": "tar.gz",
+      "executable": "smbs"
+    },
+    {
+      "key": "darwin-arm64",
+      "rustTarget": "aarch64-apple-darwin",
+      "runner": "macos-15",
+      "archive": "tar.gz",
+      "executable": "smbs"
+    },
+    {
+      "key": "windows-x64-msvc",
+      "rustTarget": "x86_64-pc-windows-msvc",
+      "runner": "windows-2025",
+      "archive": "zip",
+      "executable": "smbs.exe"
+    }
+  ]
+}

@@ -9,7 +9,46 @@ no login and does not use the Excel export. See the
 [source contract](docs/source-contract.md) for observed wire behavior and
 [ARCHITECTURE.md](ARCHITECTURE.md) for boundaries and request pacing.
 
-## Build
+## Install
+
+Prebuilt binaries come from
+[GitHub Releases](https://github.com/cpaikr/smbs/releases). They need no Rust
+toolchain, and each installer checks the SHA-256 hash of what it downloads.
+
+| Platform | Release target |
+| --- | --- |
+| Linux x64, glibc 2.35+ (Ubuntu 22.04+, Debian 12+) | `linux-x64-gnu` |
+| Linux arm64, glibc 2.35+ | `linux-arm64-gnu` |
+| macOS, Apple silicon | `darwin-arm64` |
+| Windows x64 | `windows-x64-msvc` |
+
+macOS and Linux:
+
+```sh
+curl -fsSL https://github.com/cpaikr/smbs/releases/latest/download/install.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://github.com/cpaikr/smbs/releases/latest/download/install.ps1 | iex
+```
+
+The binary goes to `~/.local/bin/smbs` or `%LOCALAPPDATA%\smbs\bin\smbs.exe`.
+Set `SMBS_INSTALL_DIR` to choose another directory. If that directory is not
+on `PATH`, the installer prints the command that adds it.
+
+Check the install:
+
+```sh
+smbs --version
+smbs --help
+```
+
+To upgrade, run the installer again. To pin a version, replace
+`latest/download` with `download/vX.Y.Z`. There is no self-update command.
+
+### Build from source
 
 Requires Rust 1.89 or later.
 
@@ -17,8 +56,7 @@ Requires Rust 1.89 or later.
 cargo build --release -p smbs-cli
 ```
 
-This builds `target/release/smbs` (`smbs.exe` on Windows). The examples below
-assume that binary is on `PATH`; otherwise call it by that path.
+This builds `target/release/smbs` (`smbs.exe` on Windows).
 
 ## Commands
 
