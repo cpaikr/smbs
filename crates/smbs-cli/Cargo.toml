@@ -27,7 +27,7 @@ serde_json.workspace = true
 sha2.workspace = true
 tar.workspace = true
 tempfile.workspace = true
-smbs = { path = "../smbs", version = "0.2.0" }
+smbs = { path = "../smbs", version = "0.3.0" }
 # HTTPS to GitHub, trusting the OS certificate store (works behind
 # TLS-inspecting corporate proxies).
 ureq = { workspace = true, features = ["rustls", "platform-verifier"] }

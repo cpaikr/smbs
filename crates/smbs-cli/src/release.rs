@@ -166,18 +166,30 @@ impl GitHub {
     /// `releases/latest` link excludes drafts and prereleases and needs no
     /// API token.
     pub fn latest(&self) -> Result<Release, FetchError> {
+        self.latest_within(METADATA_TIMEOUT)
+    }
+
+    /// As [`GitHub::latest`], with every request inside one `budget`.
+    pub fn latest_within(&self, budget: Duration) -> Result<Release, FetchError> {
+        let started = std::time::Instant::now();
         let url = format!(
             "{}/{REPOSITORY}/releases/latest/download/{MANIFEST_NAME}",
             self.origin
         );
-        let Some(bytes) = self.get(&url, MANIFEST_LIMIT, METADATA_TIMEOUT)? else {
+        let Some(bytes) = self.get(&url, MANIFEST_LIMIT, budget)? else {
             // Releases before 0.3.0 have no manifest; tell them apart from
             // "nothing published" by the checksum file every release has.
             let sums = format!(
                 "{}/{REPOSITORY}/releases/latest/download/SHA256SUMS",
                 self.origin
             );
-            return Err(match self.get(&sums, MANIFEST_LIMIT, METADATA_TIMEOUT)? {
+            let remaining = budget.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return Err(FetchError::Unavailable(
+                    "The release check ran out of time.".to_owned(),
+                ));
+            }
+            return Err(match self.get(&sums, MANIFEST_LIMIT, remaining)? {
                 Some(_) => FetchError::Invalid(
                     "The latest release has no release-manifest.json (it predates self-upgrade); reinstall with the installer from the README.".to_owned(),
                 ),

@@ -144,6 +144,19 @@ are CLI-only; the SDK never contacts GitHub.
   through `SMBS_FIXTURE_FAIL_AT`, available in fixture builds only, to cover
   rollback and repair.
 
+- **Update notices.** [`release_check.rs`](crates/smbs-cli/src/release_check.rs)
+  caches the latest-release evidence per user (`release-check-v1.json`) and
+  compares it with the running version on every use.
+  - **When it refreshes:** an incidental check, after a successful rate
+    command, refreshes at most once per 24 h with a 1.5 s network budget, and
+    waits 1 h after a failure. The attempt is recorded before the fetch, so a
+    crash or an unwritable cache cannot cause a request on every run.
+  - **When it reports:** only a newer release, or no successful check for a
+    week, becomes an `advisories` entry. `version --check` always refreshes,
+    and falls back to stale cached evidence with its age.
+  - **When it never runs:** help, `--version`, offline commands, invalid or
+    failed commands, and `SMBS_NO_UPDATE_CHECK`.
+
 ## Distribution
 
 Releases are built and published by

@@ -80,8 +80,26 @@ Installs from before 0.3.0 have no receipt. Once 0.3.0 or later is
 published, run the installer once more and `smbs upgrade` works from then on.
 If you installed with `SMBS_INSTALL_DIR`, set it to the same directory again,
 so the new binary replaces the one on your `PATH`. Rerunning the installer
-the same way also always works as an upgrade. To pin a version, replace `latest/download` with
-`download/vX.Y.Z` in the install command.
+the same way also always works as an upgrade. To pin a version, replace
+`latest/download` with `download/vX.Y.Z` in the install command.
+
+#### Update notices
+
+After a successful rate command (`monthly-average`, `month-end`, or `daily`),
+the JSON may include `advisories`, for example
+`[{"code":"update_available","message":"smbs 0.4.0 is available ...","releaseUrl":"..."}]`.
+It never changes the result or exit status.
+
+- **When it appears:** only when a newer release exists, or when no update
+  check has succeeded for a week (`update_check_unavailable`).
+- **Cost:** the latest-release check is cached for 24 hours and adds at most
+  1.5 s to a command when it refreshes. After a failure it waits an hour
+  before trying again.
+- **Turning it off:** set `SMBS_NO_UPDATE_CHECK=1`. `smbs version --check`
+  and `smbs upgrade` still check when asked.
+- **Cache location:** `%LOCALAPPDATA%\smbs\cache`, `~/Library/Caches/smbs`,
+  or `$XDG_CACHE_HOME/smbs` (`~/.cache/smbs`). Set `SMBS_CACHE_DIR` to an
+  absolute directory to move it.
 
 ### Build from source
 

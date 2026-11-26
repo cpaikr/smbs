@@ -104,6 +104,7 @@ impl Install {
             .envs(env.iter().copied())
             .env("SMBS_FIXTURE_RELEASE_ORIGIN", &fixture.origin)
             .env("SMBS_FIXTURE_RUNNING_VERSION", running)
+            .env("SMBS_CACHE_DIR", self.root.join("cache"))
             .output()
             .unwrap();
         assert!(

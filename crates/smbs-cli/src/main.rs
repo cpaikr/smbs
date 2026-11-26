@@ -183,6 +183,9 @@ struct Success<T: Serialize> {
     result: T,
     metadata: Metadata,
     warnings: Vec<String>,
+    /// Update notices; never affect the result or exit status.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    advisories: Vec<release_check::Advisory>,
 }
 
 #[derive(Serialize)]
@@ -508,11 +511,17 @@ fn run_fetch<Request, Range, Fetched, Output: Serialize>(
         Some(Ok(artifact)) => Some(artifact),
         Some(Err(error)) => return fail(Some(operation), error, metadata, pretty),
     };
-    succeed(
-        operation,
-        finish(fetched, range, artifact),
-        metadata,
-        warnings,
+    // Only after a successful network command, as an addition to its result.
+    let advisories = release_check::incidental_advisory().into_iter().collect();
+    write_success(
+        &Success {
+            ok: true,
+            operation,
+            result: finish(fetched, range, artifact),
+            metadata,
+            warnings,
+            advisories,
+        },
         pretty,
     )
 }
@@ -605,14 +614,21 @@ fn succeed<T: Serialize>(
     warnings: Vec<String>,
     pretty: bool,
 ) -> ExitCode {
-    let envelope = Success {
-        ok: true,
-        operation,
-        result,
-        metadata,
-        warnings,
-    };
-    if write_json(&envelope, pretty) {
+    write_success(
+        &Success {
+            ok: true,
+            operation,
+            result,
+            metadata,
+            warnings,
+            advisories: Vec::new(),
+        },
+        pretty,
+    )
+}
+
+fn write_success<T: Serialize>(envelope: &Success<T>, pretty: bool) -> ExitCode {
+    if write_json(envelope, pretty) {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE

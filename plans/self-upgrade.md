@@ -1,6 +1,6 @@
 # Plan: self-upgrade and update checks
 
-Status: approved 2026-11-26. PR 1 in review; PR 2 next.
+Status: approved 2026-11-26. PR 1 merged (#9); PR 2 in review; then v0.3.0.
 
 Add `smbs upgrade`, `smbs version --check`, and cached update notices,
 following darty's design (`../darty/crates/darty-cli/src/upgrade.rs`,
