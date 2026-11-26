@@ -31,6 +31,14 @@ Output:
   Each command prints one JSON document (one line unless --pretty): {\"ok\":true,\"operation\",\"result\",\"metadata\",\"warnings\"}
   or {\"ok\":false,\"operation\",\"error\":{\"code\",\"message\",\"retryable\",...}}.
   Exit status: 0 success, 1 execution failure, 2 invalid invocation.
+  Successful rate commands may add \"advisories\" (update notices), which never
+  change the result or exit status.
+
+Update checks:
+  Rate commands check GitHub for a newer smbs at most once a day, waiting at
+  most 1.5 s; the result is cached (SMBS_CACHE_DIR moves the cache). Set
+  SMBS_NO_UPDATE_CHECK=1 to turn this off. See `smbs version --check` and
+  `smbs upgrade`.
 
 Request pacing:
   Every smbs process on this machine waits 1000 ms before each request to

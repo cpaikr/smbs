@@ -85,9 +85,15 @@ Cases:
 
 ## PR 2: cached update notices
 
-- After a successful rate command, add `advisories: [{code, message}]` to the
-  JSON envelope, but only when a newer release exists or the evidence is
-  stale or failing. Nothing appears when the binary is up to date.
+- After a successful rate command, add `advisories` to the JSON envelope
+  when a newer release exists (`update_available`, or
+  `update_incomplete_distribution` without a binary for this platform), or
+  when the release information or the cache has a problem
+  (`update_check_problem`). Failing checks are reported
+  (`update_check_unavailable`) once a week has passed without success. This
+  is a deliberate quiet period for often-offline machines; every notice
+  carries `freshness` and `ageSeconds`. Nothing appears when the binary is
+  up to date.
 - **Cache.** The cache is `release-check-v1.json` in the per-user cache
   directory. `SMBS_CACHE_DIR` overrides the location and must be absolute.
   - Entries live 24 h.

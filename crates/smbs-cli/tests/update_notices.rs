@@ -4,7 +4,11 @@
 
 mod common;
 
-use std::{path::PathBuf, process::Command};
+use std::{
+    path::PathBuf,
+    process::Command,
+    time::{Duration, Instant},
+};
 
 use common::{Fixture, response};
 use serde_json::Value;
@@ -19,17 +23,45 @@ fn smbs_biz() -> Fixture {
     })
 }
 
-fn releases(version: &'static str) -> Fixture {
+fn target_key() -> &'static str {
+    if cfg!(windows) {
+        "windows-x64-msvc"
+    } else if cfg!(target_os = "macos") {
+        "darwin-arm64"
+    } else if cfg!(target_arch = "aarch64") {
+        "linux-arm64-gnu"
+    } else {
+        "linux-x64-gnu"
+    }
+}
+
+/// A release origin whose latest release is `version`, with or without a
+/// binary for this platform.
+fn releases_with(version: &'static str, installable: bool) -> Fixture {
+    let extension = if cfg!(windows) { "zip" } else { "tar.gz" };
+    let targets = if installable {
+        format!(
+            r#"{{"{key}":{{"asset":"smbs-{version}-{key}.{extension}","sha256":"{sha}"}}}}"#,
+            key = target_key(),
+            sha = "a".repeat(64)
+        )
+    } else {
+        "{}".to_owned()
+    };
+    let manifest = format!(
+        r#"{{"schemaVersion":1,"version":"{version}","tag":"v{version}","targets":{targets}}}"#
+    );
     Fixture::start(move |path| {
         if path == MANIFEST {
-            let manifest = format!(
-                r#"{{"schemaVersion":1,"version":"{version}","tag":"v{version}","targets":{{}}}}"#
-            );
             response("200 OK", "application/json", "", manifest.as_bytes())
         } else {
             response("404 Not Found", "text/plain", "", b"")
         }
     })
+}
+
+fn releases(version: &'static str) -> Fixture {
+    releases_with(version, true)
 }
 
 fn cache_dir(name: &str) -> PathBuf {
@@ -126,7 +158,7 @@ fn a_newer_release_adds_one_cached_advisory() {
     let release_check = &check["result"]["releaseCheck"];
     assert_eq!(release_check["comparison"], "newer");
     assert_eq!(release_check["freshness"], "fresh");
-    assert_eq!(release_check["installable"], false);
+    assert_eq!(release_check["installable"], true);
     assert_eq!(manifest_requests(&github), 2);
     let _ = std::fs::remove_dir_all(cache);
 }
@@ -149,13 +181,9 @@ fn opting_out_skips_the_check_entirely() {
 
 #[test]
 fn a_failed_refresh_waits_out_its_cooldown() {
-    // A closed loopback port.
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let offline = format!("http://127.0.0.1:{port}");
+    let unavailable =
+        Fixture::start(|_| response("503 Service Unavailable", "text/plain", "", b""));
+    let offline = unavailable.origin.clone();
     let cache = cache_dir("cooldown");
 
     let first = run(&offline, &cache, "0.0.1", &[], RATES);
@@ -199,4 +227,83 @@ fn offline_commands_and_failures_never_check() {
         .unwrap();
     assert_eq!(invalid.status.code(), Some(2));
     assert_eq!(github.paths(), Vec::<String>::new());
+}
+
+#[test]
+fn a_release_without_this_platform_is_not_offered_as_an_upgrade() {
+    let github = releases_with("9.9.9", false);
+    let cache = cache_dir("incomplete");
+    let value = run(&github.origin, &cache, "0.0.1", &[], RATES);
+    let advisory = &value["advisories"][0];
+    assert_eq!(
+        advisory["code"], "update_incomplete_distribution",
+        "{value}"
+    );
+    assert!(
+        !advisory["message"]
+            .as_str()
+            .unwrap()
+            .contains("smbs upgrade")
+    );
+    let _ = std::fs::remove_dir_all(cache);
+}
+
+#[test]
+fn a_slow_release_origin_cannot_hold_up_a_command() {
+    let slow = Fixture::start(|_| {
+        std::thread::sleep(Duration::from_secs(5));
+        response("503 Service Unavailable", "text/plain", "", b"")
+    });
+    let cache = cache_dir("slow");
+    let started = Instant::now();
+    let value = run(&slow.origin, &cache, "0.0.1", &[], RATES);
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        value["result"]["series"][0]["observations"][0]["rate"],
+        1000.5
+    );
+    let _ = std::fs::remove_dir_all(cache);
+}
+
+#[test]
+fn persistent_problems_are_reported_at_once() {
+    let future = Fixture::start(|path| {
+        if path == MANIFEST {
+            let manifest = r#"{"schemaVersion":2,"version":"9.9.9","tag":"v9.9.9","targets":{}}"#;
+            response("200 OK", "application/json", "", manifest.as_bytes())
+        } else {
+            response("404 Not Found", "text/plain", "", b"")
+        }
+    });
+    let cache = cache_dir("problem");
+    let value = run(&future.origin, &cache, "0.0.1", &[], RATES);
+    let advisory = &value["advisories"][0];
+    assert_eq!(advisory["code"], "update_check_problem", "{value}");
+    assert!(advisory["message"].as_str().unwrap().contains("schema 2"));
+
+    // A relative cache directory is a problem too, not a silent opt-out.
+    let github = releases("9.9.9");
+    let value = run(
+        &github.origin,
+        &PathBuf::from("relative-cache"),
+        "0.0.1",
+        &[],
+        RATES,
+    );
+    assert_eq!(
+        value["advisories"][0]["code"], "update_check_problem",
+        "{value}"
+    );
+    assert!(
+        value["advisories"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("SMBS_CACHE_DIR")
+    );
+    assert_eq!(github.paths(), Vec::<String>::new());
+    let _ = std::fs::remove_dir_all(cache);
 }
