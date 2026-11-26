@@ -8,7 +8,9 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-# Reads SMBS_FIXTURE_ORIGIN so process tests can use a loopback server.
+# Test-only switches, all loopback/offline: SMBS_FIXTURE_ORIGIN (smbs.biz),
+# SMBS_FIXTURE_RELEASE_ORIGIN (GitHub releases), SMBS_FIXTURE_RUNNING_VERSION,
+# and SMBS_FIXTURE_FAIL_AT (upgrade failure injection). Release builds omit it.
 fixture-origin = ["smbs/fixture-origin"]
 
 [[bin]]
@@ -18,15 +20,24 @@ doc = false
 
 [dependencies]
 clap.workspace = true
+flate2.workspace = true
 rust_xlsxwriter.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tar.workspace = true
 tempfile.workspace = true
 smbs = { path = "../smbs", version = "0.2.0" }
+# HTTPS to GitHub, trusting the OS certificate store (works behind
+# TLS-inspecting corporate proxies).
+ureq = { workspace = true, features = ["rustls", "platform-verifier"] }
+zip.workspace = true
 
 [dev-dependencies]
 encoding_rs.workspace = true
+flate2.workspace = true
+sha2.workspace = true
+tar.workspace = true
 zip.workspace = true
 
 [lints]

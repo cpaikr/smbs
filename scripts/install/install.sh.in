@@ -35,6 +35,21 @@ detect_target() {
   esac
 }
 
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum < "$1" | cut -d ' ' -f 1
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 < "$1" | cut -d ' ' -f 1
+  else
+    fail "sha256sum or shasum is required to verify the download."
+  fi
+}
+
+# A JSON string literal for $1 (escapes backslashes and double quotes).
+json_string() {
+  printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+}
+
 main() {
   version="@@VERSION@@"
   base_url="https://github.com/cpaikr/smbs/releases/download/v${version}"
@@ -59,13 +74,7 @@ main() {
     fail "curl or wget is required."
   fi
 
-  if command -v sha256sum >/dev/null 2>&1; then
-    actual="$(sha256sum "${workdir}/${archive}" | cut -d ' ' -f 1)"
-  elif command -v shasum >/dev/null 2>&1; then
-    actual="$(shasum -a 256 "${workdir}/${archive}" | cut -d ' ' -f 1)"
-  else
-    fail "sha256sum or shasum is required to verify the download."
-  fi
+  actual="$(sha256_of "${workdir}/${archive}")"
   [ "$actual" = "$sha256" ] || fail "checksum mismatch for ${archive} (expected ${sha256}, got ${actual})."
 
   mkdir "${workdir}/extract"
@@ -75,12 +84,30 @@ main() {
   chmod 755 "$staged"
   "$staged" --version >/dev/null 2>&1 || fail "the downloaded binary does not run on this system."
 
+  # json_string escapes quotes and backslashes only; JSON forbids raw control
+  # characters, so such a path could not get a valid receipt. Checked before
+  # anything is installed.
+  case "$install_dir" in
+    *[[:cntrl:]]*) fail "the install directory contains control characters; choose another SMBS_INSTALL_DIR." ;;
+  esac
   mkdir -p "$install_dir"
   # Copy next to the destination, then rename: the swap is atomic.
   partial="${install_dir}/.smbs.install.$$"
   cp "$staged" "$partial"
   mv -f "$partial" "${install_dir}/smbs"
   partial=""
+
+  # The receipt lets `smbs upgrade` recognize this binary as installer-managed.
+  executable="$(CDPATH='' cd -P -- "$install_dir" >/dev/null && pwd -P)/smbs"
+  partial="${install_dir}/.smbs-receipt.install.$$"
+  printf '{"schemaVersion":1,"version":%s,"target":%s,"executable":%s,"source":%s,"sha256":%s}\n' \
+    "$(json_string "$version")" "$(json_string "$target")" "$(json_string "$executable")" \
+    '"https://github.com/cpaikr/smbs/releases"' \
+    "$(json_string "$(sha256_of "${install_dir}/smbs")")" > "$partial"
+  mv -f "$partial" "${install_dir}/.smbs-receipt.json"
+  partial=""
+  # Files an interrupted `smbs upgrade` may have left behind.
+  rm -f "${install_dir}"/.smbs-new-* "${install_dir}"/.smbs-old-* "${install_dir}"/.smbs-receipt-new-*
 
   printf 'Installed smbs %s to %s/smbs\n' "$version" "$install_dir"
   case ":${PATH}:" in
