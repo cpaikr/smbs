@@ -80,8 +80,36 @@ Installs from before 0.3.0 have no receipt. Once 0.3.0 or later is
 published, run the installer once more and `smbs upgrade` works from then on.
 If you installed with `SMBS_INSTALL_DIR`, set it to the same directory again,
 so the new binary replaces the one on your `PATH`. Rerunning the installer
-the same way also always works as an upgrade. To pin a version, replace `latest/download` with
-`download/vX.Y.Z` in the install command.
+the same way also always works as an upgrade. To pin a version, replace
+`latest/download` with `download/vX.Y.Z` in the install command.
+
+#### Update notices
+
+After a successful rate command (`monthly-average`, `month-end`, or `daily`),
+the JSON may include `advisories`, for example
+`[{"code":"update_available","message":"smbs 0.4.0 is available ...","releaseUrl":"..."}]`.
+It never changes the result or exit status.
+
+- **When it appears:** only in these cases, each with a `code`, plus
+  `freshness` and `ageSeconds` describing the evidence:
+  - `update_available`: a newer release exists for this platform.
+  - `update_incomplete_distribution`: a newer release exists, but without a
+    binary for this platform.
+  - `update_check_problem`: the release information or the cache cannot be
+    used, for example a release format this version does not understand or
+    an unwritable cache directory. Shown at once.
+  - `update_check_unavailable`: no check has succeeded for a week. On a
+    machine that is often offline this stays quiet for the first week;
+    `smbs version --check` always reports the details.
+- **Cost:** the latest-release check is cached for 24 hours. A refresh never
+  delays a command by more than 1.5 s; a check that takes longer finishes or
+  is dropped in the background. After an unsuccessful attempt it waits an
+  hour (a day for persistent problems) before trying again.
+- **Turning it off:** set `SMBS_NO_UPDATE_CHECK` to any non-empty value other
+  than `0`. `smbs version --check` and `smbs upgrade` still check when asked.
+- **Cache location:** `%LOCALAPPDATA%\smbs\cache`, `~/Library/Caches/smbs`,
+  or `$XDG_CACHE_HOME/smbs` (`~/.cache/smbs`). Set `SMBS_CACHE_DIR` to an
+  absolute directory to move it.
 
 ### Build from source
 

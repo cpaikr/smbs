@@ -48,6 +48,8 @@ fn smbs(
         .args(args)
         .env_remove("SMBS_REQUEST_INTERVAL_MS")
         .env_remove("SMBS_FIXTURE_ORIGIN")
+        // Update notices are covered in tests/update_notices.rs; never reach GitHub here.
+        .env("SMBS_NO_UPDATE_CHECK", "1")
         .env("SMBS_STATE_DIR", state)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
