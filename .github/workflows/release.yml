@@ -230,6 +230,9 @@ jobs:
           # The installed binary accepts its real installer receipt (see the Unix step).
           $check = (& $bin upgrade --check) | ConvertFrom-Json
           if ($check.error.code -eq 'unmanaged_installation') { throw "receipt rejected: $($check.error.message)" }
+          # upgrade --check may exit 1 (e.g. the latest release predates this one);
+          # only the receipt check above decides this step.
+          exit 0
       - name: Install with install.ps1 (Windows PowerShell 5.1)
         if: runner.os == 'Windows'
         shell: powershell
@@ -242,6 +245,9 @@ jobs:
           if ((& $bin --version) -ne "smbs $env:VERSION") { throw 'unexpected --version output' }
           $check = (& $bin upgrade --check) | ConvertFrom-Json
           if ($check.error.code -eq 'unmanaged_installation') { throw "receipt rejected: $($check.error.message)" }
+          # upgrade --check may exit 1 (e.g. the latest release predates this one);
+          # only the receipt check above decides this step.
+          exit 0
 
   publish:
     needs: [prepare, verify]

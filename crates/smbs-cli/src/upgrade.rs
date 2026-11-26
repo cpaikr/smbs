@@ -779,14 +779,17 @@ mod tests {
 
     #[test]
     fn plain_paths_drop_only_the_local_verbatim_prefix() {
-        assert_eq!(
-            plain(Path::new(r"\\?\C:\Users\u\smbs.exe")),
-            r"C:\Users\u\smbs.exe"
-        );
-        assert_eq!(
-            plain(Path::new(r"\\?\UNC\server\share\smbs.exe")),
-            r"\\?\UNC\server\share\smbs.exe"
-        );
+        // Windows path prefixes are only parsed on Windows.
+        if cfg!(windows) {
+            assert_eq!(
+                plain(Path::new(r"\\?\C:\Users\u\smbs.exe")),
+                r"C:\Users\u\smbs.exe"
+            );
+            assert_eq!(
+                plain(Path::new(r"\\?\UNC\server\share\smbs.exe")),
+                r"\\?\UNC\server\share\smbs.exe"
+            );
+        }
         assert_eq!(
             plain(Path::new("/usr/local/bin/smbs")),
             "/usr/local/bin/smbs"
