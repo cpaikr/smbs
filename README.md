@@ -198,6 +198,17 @@ on other hosts, or with a different `SMBS_STATE_DIR` are not coordinated.
 
 `0` disables pacing. Use it only against a local fixture.
 
+## Agent skill
+
+The consumer skill source is in [`skill/smbs`](skill/smbs/SKILL.md). It guides
+agents to the right command for a rate request (monthly average, month-end,
+or daily), keeps quote units and missing periods straight, and loads
+installation guidance only when the executable is needed.
+
+Copy the complete `skill/smbs` directory into a skill location supported by
+your agent, including `references/` and `agents/`. The installed skill can apply
+implicitly to smbs.biz base-rate requests or be invoked explicitly with `$smbs`.
+
 ## Development
 
 ```sh
