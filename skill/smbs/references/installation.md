@@ -20,7 +20,10 @@ or login. An update notice alone is not an upgrade request.
   `unmanaged_installation`, the binary was not installed by the installer, or
   was installed before 0.3.0. Run the installer once, with the same
   `SMBS_INSTALL_DIR` if one was used originally, and later updates can use
-  `smbs upgrade`.
+  `smbs upgrade`. If it still reports `unmanaged_installation`, another `smbs`
+  may come first on PATH: compare `command -v smbs` (PowerShell:
+  `(Get-Command smbs).Source`) with the installed path. Then put the install
+  directory earlier on PATH, or remove the other copy.
 - `smbs upgrade --check` and `smbs version --check` report availability
   without changing anything.
 
