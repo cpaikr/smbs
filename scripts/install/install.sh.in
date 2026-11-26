@@ -92,13 +92,16 @@ main() {
   partial=""
 
   # The receipt lets `smbs upgrade` recognize this binary as installer-managed.
-  executable="$(cd "$install_dir" && pwd -P)/smbs"
+  executable="$(CDPATH='' cd -P -- "$install_dir" >/dev/null && pwd -P)/smbs"
   partial="${install_dir}/.smbs-receipt.install.$$"
-  printf '{"schemaVersion":1,"version":%s,"target":%s,"executable":%s,"sha256":%s}\n' \
+  printf '{"schemaVersion":1,"version":%s,"target":%s,"executable":%s,"source":%s,"sha256":%s}\n' \
     "$(json_string "$version")" "$(json_string "$target")" "$(json_string "$executable")" \
+    '"https://github.com/cpaikr/smbs/releases"' \
     "$(json_string "$(sha256_of "${install_dir}/smbs")")" > "$partial"
   mv -f "$partial" "${install_dir}/.smbs-receipt.json"
   partial=""
+  # Files an interrupted `smbs upgrade` may have left behind.
+  rm -f "${install_dir}"/.smbs-new-* "${install_dir}"/.smbs-old-* "${install_dir}"/.smbs-receipt-new-*
 
   printf 'Installed smbs %s to %s/smbs\n' "$version" "$install_dir"
   case ":${PATH}:" in

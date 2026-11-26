@@ -20,8 +20,12 @@ For version `X.Y.Z`, tag `vX.Y.Z`:
 Every target is built on its own native runner. Before anything is
 published, the generated installer runs on that runner, and the installed
 binary runs `--version`, `--help`, `currencies`, and `version`. Verification
-also checks that the receipt describes the installed binary and that the
-manifest entry agrees with `SHA256SUMS`.
+also checks these on every target:
+- each archive holds exactly the binary and `LICENSE.md`;
+- the receipt describes the installed binary;
+- the manifest entry agrees with `SHA256SUMS`;
+- the installed binary's `upgrade --check` does not reject its receipt. This
+  step contacts GitHub.
 
 ## Steps
 

@@ -63,6 +63,17 @@ them. Before replacing anything, `smbs upgrade` checks the release archive's
 SHA-256 against the release manifest and runs the new binary's `--version`.
 If the swap fails, the previous binary is restored.
 
+- **Concurrent runs:** an upgrade keeps a `.smbs-upgrade.lock` file beside
+  the binary, so two upgrades cannot run at once. The lock file stays there;
+  it is harmless.
+- **Windows leftovers:** the replaced `smbs.exe` cannot be deleted while it
+  is running, so it may stay as `.smbs-old-*.exe` until the next upgrade or
+  install, which removes it.
+- **Interrupted upgrades:** if an upgrade is interrupted after the new binary
+  is in place, run `smbs upgrade` again to finish. Rerunning the installer
+  always works too.
+- **Read-only check:** `smbs upgrade --check` never changes any files.
+
 Installs from before 0.3.0 have no receipt: run the installer once more, and
 `smbs upgrade` works from then on. Rerunning the installer also always works
 as an upgrade. To pin a version, replace `latest/download` with

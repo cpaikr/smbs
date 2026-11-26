@@ -68,6 +68,7 @@ impl Install {
             "version": version,
             "target": target_key(),
             "executable": self.exe().to_str().unwrap(),
+            "source": "https://github.com/cpaikr/smbs/releases",
             "sha256": sha256,
         });
         std::fs::write(self.bin.join(".smbs-receipt.json"), format!("{receipt}\n")).unwrap();
@@ -88,8 +89,19 @@ impl Install {
     }
 
     fn run(&self, fixture: &Fixture, running: &str, args: &[&str]) -> Value {
+        self.run_with(fixture, running, &[], args)
+    }
+
+    fn run_with(
+        &self,
+        fixture: &Fixture,
+        running: &str,
+        env: &[(&str, &str)],
+        args: &[&str],
+    ) -> Value {
         let output = Command::new(self.exe())
             .args(args)
+            .envs(env.iter().copied())
             .env("SMBS_FIXTURE_RELEASE_ORIGIN", &fixture.origin)
             .env("SMBS_FIXTURE_RUNNING_VERSION", running)
             .output()
@@ -209,11 +221,17 @@ fn check_then_upgrade_replaces_the_binary_and_receipt() {
     assert_eq!(result["latestVersion"], CURRENT);
     assert_eq!(result["updateAvailable"], true);
     assert_eq!(result["updated"], false);
+    assert_eq!(result["installable"], true);
     assert_eq!(result["target"], target_key());
     assert_eq!(
         fixture.paths().len(),
         1,
         "--check fetches only the manifest"
+    );
+    assert_eq!(
+        install.files(),
+        [".smbs-receipt.json", EXE],
+        "--check creates nothing"
     );
 
     let upgrade = install.run(&fixture, OLD, &["upgrade"]);
@@ -315,8 +333,11 @@ fn a_release_without_this_platform_is_reported() {
         ..Release::of(CURRENT)
     }
     .serve();
+    // Newer, but not installable here: not reported as an available upgrade.
     let check = install.run(&fixture, OLD, &["upgrade", "--check"]);
-    assert_eq!(check["result"]["updateAvailable"], true);
+    assert_eq!(check["result"]["latestVersion"], CURRENT);
+    assert_eq!(check["result"]["updateAvailable"], false);
+    assert_eq!(check["result"]["installable"], false);
     let value = install.run(&fixture, OLD, &["upgrade"]);
     assert_eq!(value["error"]["code"], "upgrade_release_invalid");
     let version = install.run(&fixture, OLD, &["version", "--check"]);
@@ -371,4 +392,120 @@ fn an_unreachable_release_origin_is_retryable() {
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(value["error"]["code"], "upgrade_source_unavailable");
     assert_eq!(value["error"]["retryable"], true);
+}
+
+#[test]
+fn a_failed_receipt_swap_restores_the_old_binary() {
+    let install = Install::new("rollback", true);
+    let receipt_before = std::fs::read(install.bin.join(".smbs-receipt.json")).unwrap();
+    let fixture = Release::of(CURRENT).serve();
+    let value = install.run_with(
+        &fixture,
+        OLD,
+        &[("SMBS_FIXTURE_FAIL_AT", "receipt")],
+        &["upgrade"],
+    );
+    assert_eq!(value["error"]["code"], "upgrade_failed", "{value}");
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("restored")
+    );
+    assert_eq!(
+        std::fs::read(install.bin.join(".smbs-receipt.json")).unwrap(),
+        receipt_before
+    );
+    // The restored binary still runs and still matches its receipt.
+    let check = install.run(&fixture, OLD, &["upgrade", "--check"]);
+    assert_eq!(check["result"]["updateAvailable"], true, "{check}");
+    // On Windows the old image may stay as .smbs-old-* until the next upgrade.
+    let leftovers: Vec<String> = install
+        .files()
+        .into_iter()
+        .filter(|name| {
+            name.starts_with(".smbs-")
+                && name != ".smbs-receipt.json"
+                && name != ".smbs-upgrade.lock"
+        })
+        .collect();
+    assert!(
+        leftovers
+            .iter()
+            .all(|name| cfg!(windows) && name.starts_with(".smbs-old-")),
+        "{leftovers:?}"
+    );
+}
+
+#[test]
+fn an_interrupted_upgrade_is_finished_by_the_next_run() {
+    let install = Install::new("recovery", true);
+    let fixture = Release::of(CURRENT).serve();
+    // The receipt swap fails and so does putting the old binary back: the new
+    // binary is in place with the old receipt.
+    let value = install.run_with(
+        &fixture,
+        OLD,
+        &[("SMBS_FIXTURE_FAIL_AT", "receipt,restore")],
+        &["upgrade"],
+    );
+    assert_eq!(
+        value["error"]["code"], "upgrade_recovery_required",
+        "{value}"
+    );
+    assert!(
+        value["error"]["recoveryHint"]
+            .as_str()
+            .unwrap()
+            .contains("smbs upgrade")
+    );
+    assert_eq!(install.receipt()["version"], OLD);
+
+    // The binary in place is CURRENT. `--check` repairs nothing; a real run
+    // adopts the staged receipt under the lock and sweeps leftovers.
+    let check = install.run(&fixture, CURRENT, &["upgrade", "--check"]);
+    assert_eq!(check["error"]["code"], "unmanaged_installation");
+    let again = install.run(&fixture, CURRENT, &["upgrade"]);
+    assert_eq!(again["result"]["updateAvailable"], false, "{again}");
+    assert_eq!(install.receipt()["version"], CURRENT);
+    assert_eq!(
+        install.files(),
+        [".smbs-receipt.json", ".smbs-upgrade.lock", EXE]
+    );
+}
+
+#[test]
+fn a_concurrent_upgrade_is_refused_and_leftovers_wait_for_the_lock() {
+    let install = Install::new("lock", true);
+    let fixture = Release::of(CURRENT).serve();
+    std::fs::write(
+        install.bin.join(".smbs-new-1"),
+        b"staged by another upgrade",
+    )
+    .unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(install.bin.join(".smbs-upgrade.lock"))
+        .unwrap();
+    lock.try_lock().unwrap();
+
+    let value = install.run(&fixture, OLD, &["upgrade"]);
+    assert_eq!(value["error"]["code"], "upgrade_failed", "{value}");
+    assert_eq!(value["error"]["retryable"], true);
+    assert!(
+        install.bin.join(".smbs-new-1").exists(),
+        "a locked directory is not swept"
+    );
+    assert_eq!(
+        fixture.paths(),
+        Vec::<String>::new(),
+        "no download while locked"
+    );
+
+    drop(lock);
+    let upgraded = install.run(&fixture, OLD, &["upgrade"]);
+    assert_eq!(upgraded["result"]["updated"], true, "{upgraded}");
+    assert!(!install.bin.join(".smbs-new-1").exists());
 }

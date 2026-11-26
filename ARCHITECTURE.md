@@ -117,16 +117,32 @@ are CLI-only; the SDK never contacts GitHub.
 - **Verification.** The archive's SHA-256 must match the manifest. The
   archive must hold exactly the executable and `LICENSE.md`, and the staged
   binary's `--version` must print the expected version within 10 s.
-- **Replacement.** Under an exclusive `.smbs-upgrade.lock`:
+- **Locking and repair.** `--check` is read-only. A real upgrade takes the
+  directory's exclusive `.smbs-upgrade.lock` before downloading, and inspects
+  the installation again under it. Under the lock, a
+  `.smbs-receipt-new-*.json` left by an upgrade interrupted after the binary
+  swap is adopted if it fully describes the running binary. Refusals of
+  unmanaged binaries still create no files.
+- **Redirected writes.** If the staged binary resolves outside the install
+  directory, the upgrade stops with `upgrade_unsupported`. This happens when
+  a packaged Windows app's shell redirects writes to private storage.
+- **Replacement.** Under the lock:
   1. Stage the new binary and receipt in the same directory.
-  2. Set the old binary aside (a rename on Windows, which allows renaming a
-     running `.exe`; a hard link on Unix).
+  2. Set the old binary aside. On Windows this is a rename, which Windows
+     allows for a running `.exe`. On Unix it is a hard link, or a copy where
+     links are unsupported.
   3. Rename the new binary in, then the new receipt.
   4. If a step fails, restore the old binary. If that restore also fails,
-     report `upgrade_recovery_required` with the manual steps.
+     report `upgrade_recovery_required`. The staged receipt is kept so that
+     the next `smbs upgrade` can finish the job.
 
   Leftover `.smbs-new-*`, `.smbs-old-*`, and `.smbs-receipt-new-*` files are
-  swept, under the lock, on the next run.
+  swept by the next real `smbs upgrade` (under the lock) and by the
+  installers. On Windows the renames are not forced to disk (write-through
+  would need `unsafe` FFI, which the workspace forbids).
+  [`tests/upgrade.rs`](crates/smbs-cli/tests/upgrade.rs) injects failures
+  through `SMBS_FIXTURE_FAIL_AT`, available in fixture builds only, to cover
+  rollback and repair.
 
 ## Distribution
 

@@ -107,11 +107,21 @@ jobs:
         run: objdump -T stage/smbs | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
       - name: Package (tar.gz)
         if: matrix.archive == 'tar.gz'
-        run: tar -czf "$ASSET" -C stage "${{ matrix.executable }}" LICENSE.md
+        run: |
+          tar -czf "$ASSET" -C stage "${{ matrix.executable }}" LICENSE.md
+          # `smbs upgrade` accepts exactly these two entries.
+          [ "$(tar -tzf "$ASSET" | sort | tr '\n' ' ')" = "LICENSE.md smbs " ]
       - name: Package (zip)
         if: matrix.archive == 'zip'
         shell: pwsh
-        run: Compress-Archive -Path stage/* -DestinationPath $env:ASSET
+        run: |
+          Compress-Archive -Path stage/* -DestinationPath $env:ASSET
+          # `smbs upgrade` accepts exactly these two entries.
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $env:ASSET).Path)
+          $names = ($zip.Entries.FullName | Sort-Object) -join ','
+          $zip.Dispose()
+          if ($names -ne 'LICENSE.md,smbs.exe') { throw "unexpected archive entries: $names" }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: archive-${{ matrix.key }}
@@ -173,13 +183,19 @@ jobs:
           if command -v sha256sum >/dev/null; then sha="$(sha256sum "$bin" | cut -d ' ' -f 1)"; else sha="$(shasum -a 256 "$bin" | cut -d ' ' -f 1)"; fi
           exe="$(cd "$RUNNER_TEMP/bin" && pwd -P)/smbs"
           jq -e --arg version "$VERSION" --arg key "$TARGET_KEY" --arg sha "$sha" --arg exe "$exe" \
-            '. == {schemaVersion: 1, version: $version, target: $key, executable: $exe, sha256: $sha}' "$receipt"
+            '. == {schemaVersion: 1, version: $version, target: $key, executable: $exe, source: "https://github.com/cpaikr/smbs/releases", sha256: $sha}' "$receipt"
           [ "$(ls -A "$RUNNER_TEMP/bin" | sort | tr '\n' ' ')" = ".smbs-receipt.json smbs " ]
           # The manifest entry for this target matches SHA256SUMS.
           asset="$(jq -r --arg key "$TARGET_KEY" '.targets[$key].asset' release-manifest.json)"
           sum="$(grep -F "  $asset" SHA256SUMS | cut -d ' ' -f 1)"
           jq -e --arg key "$TARGET_KEY" --arg sha "$sum" \
             '.targets[$key].sha256 == $sha and .tag == ("v" + .version)' release-manifest.json
+          # The installed binary accepts its real installer receipt. This
+          # contacts GitHub, whose latest release may predate this one, so
+          # only "unmanaged" counts as a failure here.
+          check="$("$bin" upgrade --check || true)"
+          echo "$check"
+          echo "$check" | jq -e '.error.code != "unmanaged_installation"'
       - name: Install with install.ps1 (PowerShell 7) and run the binary
         if: runner.os == 'Windows'
         shell: pwsh
@@ -203,9 +219,17 @@ jobs:
           if ($files -ne '.smbs-receipt.json,smbs.exe') { throw "unexpected install files: $files" }
           $receipt = Get-Content (Join-Path $env:SMBS_INSTALL_DIR '.smbs-receipt.json') -Raw | ConvertFrom-Json
           $sha = (Get-FileHash $bin -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($receipt.version -ne $env:VERSION -or $receipt.target -ne $env:TARGET_KEY -or $receipt.sha256 -ne $sha -or $receipt.executable -ne (Resolve-Path $bin).ProviderPath) {
+          if ($receipt.version -ne $env:VERSION -or $receipt.target -ne $env:TARGET_KEY -or $receipt.sha256 -ne $sha -or $receipt.executable -ne (Resolve-Path $bin).ProviderPath -or $receipt.source -ne 'https://github.com/cpaikr/smbs/releases') {
             throw "receipt does not describe the installed binary: $($receipt | ConvertTo-Json -Compress)"
           }
+          # The manifest entry for this target matches SHA256SUMS.
+          $manifest = Get-Content dist/release-manifest.json -Raw | ConvertFrom-Json
+          $entry = $manifest.targets.$env:TARGET_KEY
+          $sum = (Select-String -Path dist/SHA256SUMS -SimpleMatch "  $($entry.asset)").Line.Split(' ')[0]
+          if ($entry.sha256 -ne $sum -or $manifest.tag -ne "v$($manifest.version)") { throw 'manifest disagrees with SHA256SUMS' }
+          # The installed binary accepts its real installer receipt (see the Unix step).
+          $check = (& $bin upgrade --check) | ConvertFrom-Json
+          if ($check.error.code -eq 'unmanaged_installation') { throw "receipt rejected: $($check.error.message)" }
       - name: Install with install.ps1 (Windows PowerShell 5.1)
         if: runner.os == 'Windows'
         shell: powershell
@@ -216,6 +240,8 @@ jobs:
           Get-Content dist/install.ps1 -Raw | Invoke-Expression
           $bin = Join-Path $env:SMBS_INSTALL_DIR 'smbs.exe'
           if ((& $bin --version) -ne "smbs $env:VERSION") { throw 'unexpected --version output' }
+          $check = (& $bin upgrade --check) | ConvertFrom-Json
+          if ($check.error.code -eq 'unmanaged_installation') { throw "receipt rejected: $($check.error.message)" }
 
   publish:
     needs: [prepare, verify]
