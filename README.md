@@ -61,7 +61,9 @@ recording its version, platform, path, and SHA-256. Binaries built from
 source or copied elsewhere are refused; upgrade those the way you installed
 them. Before replacing anything, `smbs upgrade` checks the release archive's
 SHA-256 against the release manifest and runs the new binary's `--version`.
-If the swap fails, the previous binary is restored.
+If the swap fails, the previous binary is restored. If restoring also fails,
+the command reports `upgrade_recovery_required` with a `recoveryHint`.
+Follow that hint, usually by running `smbs upgrade` again.
 
 - **Concurrent runs:** an upgrade keeps a `.smbs-upgrade.lock` file beside
   the binary, so two upgrades cannot run at once. The lock file stays there;
@@ -74,9 +76,11 @@ If the swap fails, the previous binary is restored.
   always works too.
 - **Read-only check:** `smbs upgrade --check` never changes any files.
 
-Installs from before 0.3.0 have no receipt: run the installer once more, and
-`smbs upgrade` works from then on. Rerunning the installer also always works
-as an upgrade. To pin a version, replace `latest/download` with
+Installs from before 0.3.0 have no receipt. Once 0.3.0 or later is
+published, run the installer once more and `smbs upgrade` works from then on.
+If you installed with `SMBS_INSTALL_DIR`, set it to the same directory again,
+so the new binary replaces the one on your `PATH`. Rerunning the installer
+the same way also always works as an upgrade. To pin a version, replace `latest/download` with
 `download/vX.Y.Z` in the install command.
 
 ### Build from source

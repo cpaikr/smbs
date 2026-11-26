@@ -338,7 +338,10 @@ mod tests {
 
     #[test]
     fn manifests_are_validated_for_this_platform() {
-        let key = target_key().expect("tests run on a release platform");
+        // Platforms without published binaries (source builds) have no entry to check.
+        let Some(key) = target_key() else {
+            return;
+        };
         let extension = if key.starts_with("windows") {
             "zip"
         } else {
